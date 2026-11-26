@@ -11,7 +11,7 @@
 #include <stdlib.h>
 
 #define APP_TITLE       "M1 Tank Platoon II - Native Setup"
-#define APP_VERSION     "v0.1.0"
+#define APP_VERSION     "v0.2.0"
 #define PAYLOAD_MAGIC   "M1NATV01"
 
 #define IDC_PATH_EDIT   101
@@ -112,8 +112,37 @@ static int IsOurNativeDdraw(const char* path) {
     return found;
 }
 
+static int g_autoDetected = 0;
+
+static void TrimTrailingSlashes(char* s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\\' || s[n - 1] == '/' || s[n - 1] == ' ' || s[n - 1] == '"')) {
+        s[--n] = '\0';
+    }
+}
+
+static int QueryRegPath(HKEY root, const char* subkey, REGSAM sam, const char* valName, char* outDir, size_t outCap) {
+    HKEY hk = NULL;
+    if (RegOpenKeyExA(root, subkey, 0, KEY_READ | sam, &hk) != ERROR_SUCCESS) return 0;
+    char buf[MAX_PATH] = {0};
+    DWORD cb = sizeof(buf) - 1;
+    DWORD type = 0;
+    int found = 0;
+    if (RegQueryValueExA(hk, valName, NULL, &type, (LPBYTE)buf, &cb) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ) && buf[0]) {
+        TrimTrailingSlashes(buf);
+        if (HasM1TP2Exe(buf)) {
+            lstrcpynA(outDir, buf, (int)outCap);
+            found = 1;
+        }
+    }
+    RegCloseKey(hk);
+    return found;
+}
+
 static void DetectGameDir(char* outDir, size_t outCap) {
     outDir[0] = '\0';
+    g_autoDetected = 0;
 
     // 1. Check same folder as installer
     char selfDir[MAX_PATH];
@@ -123,45 +152,54 @@ static void DetectGameDir(char* outDir, size_t outCap) {
         *slash = '\0';
         if (HasM1TP2Exe(selfDir)) {
             lstrcpynA(outDir, selfDir, (int)outCap);
+            g_autoDetected = 1;
             return;
         }
     }
 
-    // 2. Check GOG Registry keys for M1 Tank Platoon II (GOG ID 1658549380)
-    const char* regKeys[] = {
-        "SOFTWARE\\WOW6432Node\\GOG.com\\Games\\1658549380",
-        "SOFTWARE\\GOG.com\\Games\\1658549380"
+    // 2. Check GOG.com / GOG Galaxy / Inno Setup & Retail Registry keys (both 32-bit & 64-bit views, HKLM & HKCU)
+    struct { HKEY root; const char* key; const char* val; } regChecks[] = {
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\GOG.com\\Games\\1658549380", "path" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\GOG.com\\Games\\1658549380", "workingDir" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\GOG.com\\Games\\1658549380", "path" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\GOG.com\\Games\\1658549380", "workingDir" },
+        { HKEY_CURRENT_USER,  "SOFTWARE\\GOG.com\\Games\\1658549380", "path" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1658549380_is1", "InstallLocation" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1658549380_is1", "Inno Setup: App Path" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1658549380_is1", "InstallLocation" },
+        { HKEY_CURRENT_USER,  "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\1658549380_is1", "InstallLocation" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\MicroProse\\M1 Tank Platoon II", "InstallPath" },
+        { HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\MicroProse\\M1 Tank Platoon II", "InstallPath" },
     };
-    for (int i = 0; i < 2; ++i) {
-        HKEY hk = NULL;
-        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, regKeys[i], 0, KEY_READ, &hk) == ERROR_SUCCESS) {
-            char buf[MAX_PATH] = {0};
-            DWORD cb = sizeof(buf) - 1;
-            if (RegQueryValueExA(hk, "path", NULL, NULL, (LPBYTE)buf, &cb) == ERROR_SUCCESS) {
-                if (HasM1TP2Exe(buf)) {
-                    RegCloseKey(hk);
-                    lstrcpynA(outDir, buf, (int)outCap);
-                    return;
-                }
+    const REGSAM sams[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
+    for (size_t i = 0; i < sizeof(regChecks) / sizeof(regChecks[0]); ++i) {
+        for (int s = 0; s < 2; ++s) {
+            if (QueryRegPath(regChecks[i].root, regChecks[i].key, sams[s], regChecks[i].val, outDir, outCap)) {
+                g_autoDetected = 1;
+                return;
             }
-            RegCloseKey(hk);
         }
     }
 
-    // 3. Common GOG & Retail CD install locations
-    const char* candidates[] = {
-        "C:\\GOG Games\\M1 Tank Platoon II",
-        "C:\\Program Files (x86)\\GOG Galaxy\\Games\\M1 Tank Platoon II",
-        "C:\\Program Files\\GOG Galaxy\\Games\\M1 Tank Platoon II",
-        "D:\\GOG Games\\M1 Tank Platoon II",
-        "D:\\Games\\M1 Tank Platoon II",
-        "C:\\Program Files (x86)\\MicroProse\\M1 Tank Platoon II",
-        "C:\\MicroProse\\M1 Tank Platoon II",
+    // 3. Scan common GOG & Retail CD install paths across drives C: through H:
+    const char* relPaths[] = {
+        "GOG Games\\M1 Tank Platoon II",
+        "Program Files (x86)\\GOG Galaxy\\Games\\M1 Tank Platoon II",
+        "Program Files\\GOG Galaxy\\Games\\M1 Tank Platoon II",
+        "Games\\M1 Tank Platoon II",
+        "Games\\GOG\\M1 Tank Platoon II",
+        "Program Files (x86)\\MicroProse\\M1 Tank Platoon II",
+        "MicroProse\\M1 Tank Platoon II",
     };
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
-        if (HasM1TP2Exe(candidates[i])) {
-            lstrcpynA(outDir, candidates[i], (int)outCap);
-            return;
+    for (char drv = 'C'; drv <= 'H'; ++drv) {
+        for (size_t i = 0; i < sizeof(relPaths) / sizeof(relPaths[0]); ++i) {
+            char cand[MAX_PATH];
+            snprintf(cand, sizeof(cand), "%c:\\%s", drv, relPaths[i]);
+            if (HasM1TP2Exe(cand)) {
+                lstrcpynA(outDir, cand, (int)outCap);
+                g_autoDetected = 1;
+                return;
+            }
         }
     }
 }
@@ -243,16 +281,28 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 "MenuAspectMode = 1\n"
                 "# AspectMode (3D Combat): 0=SmartHor+ (Default), 1=All3DHor+, 2=4:3, 3=Stretch\n"
                 "AspectMode = 0\n"
+                "# MapAspectMode (Battleplanner / IVIS Map): 0=FillScreen, 1=4:3 (Default), 2=16:10\n"
+                "MapAspectMode = 1\n"
                 "MSAA = 4\n"
                 "Anisotropy = 16\n"
                 "TexFilter3D = 0\n"
                 "LinearFilter2D = 1\n"
                 "LinearFilterLfb = 0\n"
+                "# DrawDistance: 0=2km(Stock), 1=3km(Extended), 2=4km(Long), 3=6km(Max)\n"
+                "DrawDistance = 1\n"
                 "FogMode = 0\n"
                 "Gamma = 1.00\n"
                 "ForceGlideOnD3D = 1\n"
                 "SkipIntro = %d\n"
+                "ShowLauncherOnStartup = 1\n"
                 "EnableMods = 1\n"
+                "FixCampaignFrontBug = 1\n"
+                "CampaignIntelHud = 1\n"
+                "# GunnerMouseMode: 0=PrecisionStick (Default), 1=DirectRawMouse, 2=Stock1998\n"
+                "GunnerMouseMode = 0\n"
+                "GunnerMouseSens = 1.00\n"
+                "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n"
+                "BallisticLeadMode = 0\n"
                 "ShowStatsHud = 0\n",
                 enableGlideAndSkipIntro ? 1 : 0);
             fclose(f);
@@ -403,7 +453,8 @@ static int DoUninstall(const char* gameDir, char* errMsg, size_t errCap) {
         "m1tp2_recomp.dll",
         "SDL3.dll",
         "ddraw.dll",
-        "THIRD_PARTY_LICENSES.txt"
+        "THIRD_PARTY_LICENSES.txt",
+        "docs\\M1TP2_Quickstart_Keys.png"
     };
     for (size_t i = 0; i < sizeof(removeFiles) / sizeof(removeFiles[0]); ++i) {
         char p[MAX_PATH];
@@ -441,8 +492,9 @@ static void RefreshPathStatus(HWND hwnd) {
     }
     int ok = HasM1TP2Exe(dir);
     SetDlgItemTextA(hwnd, IDC_STATUS_TXT,
-                    ok ? "Status: Found M1TP2.exe - ready for 1-click installation!"
-                       : "Status: Please select the folder containing M1TP2.exe.");
+                    ok ? (g_autoDetected ? "Status: Auto-detected M1TP2.exe (GOG/Retail) - ready for 1-click install!"
+                                         : "Status: Found M1TP2.exe - ready for 1-click installation!")
+                       : "Status: M1TP2.exe not auto-detected - click Browse... to select your game folder.");
     EnableWindow(GetDlgItem(hwnd, IDC_INSTALL_BTN), ok);
     EnableWindow(GetDlgItem(hwnd, IDC_UNINST_BTN), ok);
 }

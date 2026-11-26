@@ -443,23 +443,52 @@ def cmd_3dz_to_obj(args: argparse.Namespace) -> None:
 
 def cmd_dump_units(args: argparse.Namespace) -> None:
     exe = (GAME_ROOT / "M1TP2.exe").read_bytes()
-    # Extract unit roster strings (0x479804..0x479A0C in VA -> file offset via .rdata/.data scan)
-    anchor_u = exe.find(b"2S19 SPG\x00")
-    anchor_end = exe.find(b"M1A2 ABRAMS\x00", anchor_u) + 12
-    units = [s.decode("latin1") for s in exe[anchor_u:anchor_end].split(b"\x00") if len(s) >= 3]
+    # Read all 94 UnitType structs at VA 0x479A80 (stride 0x80) using PE section mapping
+    # Locate PE .data section containing VA 0x479A80
+    pe_off, = struct.unpack_from("<I", exe, 0x3C)
+    num_sec, = struct.unpack_from("<H", exe, pe_off + 6)
+    opt_sz, = struct.unpack_from("<H", exe, pe_off + 20)
+    image_base, = struct.unpack_from("<I", exe, pe_off + 52)
+    sec_off = pe_off + 24 + opt_sz
 
-    anchor_w = exe.find(b"125mm\nAPFSDS")
-    weapons_chunk = exe[max(0, anchor_w - 64) : anchor_w + 512]
-    ordnance = [
-        s.decode("latin1").replace("\n", " ").strip()
-        for s in weapons_chunk.split(b"\x00")
-        if 3 <= len(s) <= 24 and all(c in (10,) or 32 <= c < 127 for c in s)
-    ]
+    sections = []
+    for i in range(num_sec):
+        s_va, s_raw_sz, s_raw_ptr = struct.unpack_from("<III", exe, sec_off + i * 40 + 12)
+        sections.append((image_base + s_va, s_raw_ptr, s_raw_sz))
 
-    result = {"unit_count": len(units), "units": units, "ordnance_labels": ordnance}
+    def va_to_off(va: int) -> int:
+        for base_va, raw_ptr, raw_sz in sections:
+            if base_va <= va < base_va + raw_sz:
+                return raw_ptr + (va - base_va)
+        return -1
+
+    units = []
+    for idx in range(94):
+        off = va_to_off(0x479A80 + idx * 0x80)
+        if off < 0:
+            break
+        name_va, = struct.unpack_from("<I", exe, off)
+        noff = va_to_off(name_va)
+        name = exe[noff : noff + 32].split(b"\x00")[0].decode("latin1", errors="replace") if noff >= 0 else f"UNIT_{idx}"
+        f = list(struct.unpack_from("<31i", exe, off + 4))
+        units.append({
+            "index": idx,
+            "name": name,
+            "class_id": f[0],
+            "top_speed": f[19],
+            "weapons": f[4:10],
+            "ammo": f[10:16],
+            "fields": {f"f{k}": f[k] for k in range(31)},
+        })
+
+    result = {
+        "_comment": "Drop into mods/<your_mod>/units.json to override any unit's stats live at runtime!",
+        "unit_count": len(units),
+        "units": units,
+    }
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
-        print(f"Wrote {len(units)} units & {len(ordnance)} ordnance labels -> {args.out}")
+        print(f"Wrote {len(units)} structured UnitType records -> {args.out}")
     else:
         print(json.dumps(result, indent=2))
 

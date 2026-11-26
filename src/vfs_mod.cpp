@@ -23,10 +23,19 @@ struct ModFileEntry {
     bool logged = false;
 };
 
+struct UnitTypeRaw {
+    const char* name;
+    int32_t     f[31];
+};
+static_assert(sizeof(UnitTypeRaw) == addr::kUnitTypeStride, "UnitTypeRaw stride mismatch");
+
 CRITICAL_SECTION g_vfsLock;
 bool g_vfsLockInited = false;
 std::string g_gameRoot;
 std::unordered_map<std::string, ModFileEntry> g_modFiles;
+std::vector<std::string> g_mountedModDirs;
+UnitTypeRaw g_stockUnits[addr::kUnitTypeCount] = {};
+bool g_stockUnitsSaved = false;
 int g_activeModCount = 0;
 
 using CatalogFindEntryFn = void* (__cdecl*)(void* slot, const char* filename);
@@ -197,10 +206,13 @@ static void RebuildModIndexLocked() {
         if (hasOverride) modOrder.emplace_back("override");
     }
 
+    g_mountedModDirs.clear();
     std::unordered_set<std::string> uniquePaths;
     for (const auto& modName : modOrder) {
         size_t before = g_modFiles.size();
-        ScanModDirRecursive(modName, modsDir + "\\" + modName, "");
+        std::string fullModDir = modsDir + "\\" + modName;
+        g_mountedModDirs.push_back(fullModDir);
+        ScanModDirRecursive(modName, fullModDir, "");
         g_activeModCount++;
         LogPrintf("[VFS] Mounted mod '%s' (+%zu keys)\n", modName.c_str(), g_modFiles.size() - before);
     }
@@ -210,6 +222,162 @@ static void RebuildModIndexLocked() {
     g_stats.modFiles   = static_cast<int>(uniquePaths.size());
     LogPrintf("[VFS] Ready: %d active mod(s), %d unique override file(s) (%zu lookup keys)\n",
               g_stats.activeMods, g_stats.modFiles, g_modFiles.size());
+}
+
+static bool ReadTextFile(const std::string& path, std::string& out) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    long sz = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 4 * 1024 * 1024) { std::fclose(f); return false; }
+    out.resize(static_cast<size_t>(sz));
+    size_t rd = std::fread(out.data(), 1, static_cast<size_t>(sz), f);
+    std::fclose(f);
+    out.resize(rd);
+    return true;
+}
+
+static void RestoreStockUnitsLocked() {
+    auto* tbl = reinterpret_cast<UnitTypeRaw*>(addr::g_UnitTypeTable);
+    if (!g_stockUnitsSaved) {
+        std::memcpy(g_stockUnits, tbl, sizeof(g_stockUnits));
+        g_stockUnitsSaved = true;
+    } else {
+        std::memcpy(tbl, g_stockUnits, sizeof(g_stockUnits));
+    }
+    g_stats.unitOverrides = 0;
+}
+
+// Lightweight zero-dependency JSON parser for mods/<mod>/units.json
+static void ApplyUnitsJsonFileLocked(const std::string& jsonPath) {
+    std::string txt;
+    if (!ReadTextFile(jsonPath, txt)) return;
+
+    auto* tbl = reinterpret_cast<UnitTypeRaw*>(addr::g_UnitTypeTable);
+    size_t pos = 0;
+    int applied = 0;
+
+    auto skipWs = [&]() {
+        while (pos < txt.size() && (txt[pos] == ' ' || txt[pos] == '\t' || txt[pos] == '\r' || txt[pos] == '\n' || txt[pos] == ','))
+            ++pos;
+    };
+    auto parseStr = [&](std::string& out) -> bool {
+        skipWs();
+        if (pos >= txt.size() || txt[pos] != '"') return false;
+        ++pos;
+        out.clear();
+        while (pos < txt.size() && txt[pos] != '"') {
+            if (txt[pos] == '\\' && pos + 1 < txt.size()) ++pos;
+            out.push_back(txt[pos++]);
+        }
+        if (pos < txt.size() && txt[pos] == '"') ++pos;
+        return true;
+    };
+    auto parseInt = [&](int32_t& out) -> bool {
+        skipWs();
+        if (pos >= txt.size()) return false;
+        char* endp = nullptr;
+        long v = std::strtol(txt.c_str() + pos, &endp, 10);
+        if (endp == txt.c_str() + pos) return false;
+        out = static_cast<int32_t>(v);
+        pos = static_cast<size_t>(endp - txt.c_str());
+        return true;
+    };
+
+    // Find every '{ ... }' object inside the "units" array (or top-level array)
+    size_t arrPos = txt.find('[');
+    if (arrPos == std::string::npos) return;
+    pos = arrPos + 1;
+
+    while (pos < txt.size()) {
+        size_t objStart = txt.find('{', pos);
+        if (objStart == std::string::npos) break;
+        pos = objStart + 1;
+
+        int targetIdx = -1;
+        std::string targetName;
+        std::vector<std::pair<int, int32_t>> patches;
+
+        while (pos < txt.size()) {
+            skipWs();
+            if (pos >= txt.size() || txt[pos] == '}') { if (pos < txt.size()) ++pos; break; }
+            std::string key;
+            if (!parseStr(key)) { ++pos; continue; }
+            skipWs();
+            if (pos < txt.size() && txt[pos] == ':') ++pos;
+            skipWs();
+
+            if (_stricmp(key.c_str(), "name") == 0) {
+                parseStr(targetName);
+            } else if (_stricmp(key.c_str(), "index") == 0) {
+                int32_t iv = -1;
+                if (parseInt(iv)) targetIdx = iv;
+            } else if (_stricmp(key.c_str(), "top_speed") == 0) {
+                int32_t iv = 0; if (parseInt(iv)) patches.emplace_back(19, iv);
+            } else if (_stricmp(key.c_str(), "class_id") == 0) {
+                int32_t iv = 0; if (parseInt(iv)) patches.emplace_back(0, iv);
+            } else if (_stricmp(key.c_str(), "weapons") == 0 || _stricmp(key.c_str(), "ammo") == 0) {
+                int baseField = (_stricmp(key.c_str(), "weapons") == 0) ? 4 : 10;
+                if (pos < txt.size() && txt[pos] == '[') {
+                    ++pos;
+                    for (int k = 0; k < 6 && pos < txt.size(); ++k) {
+                        skipWs();
+                        if (txt[pos] == ']') break;
+                        int32_t iv = 0;
+                        if (parseInt(iv)) patches.emplace_back(baseField + k, iv);
+                        else break;
+                    }
+                    size_t endArr = txt.find(']', pos);
+                    if (endArr != std::string::npos) pos = endArr + 1;
+                }
+            } else if ((key[0] == 'f' || key[0] == 'F') && key.size() >= 2 && std::isdigit(static_cast<unsigned char>(key[1]))) {
+                int fi = std::atoi(key.c_str() + 1);
+                int32_t iv = 0;
+                if (fi >= 0 && fi < 31 && parseInt(iv)) patches.emplace_back(fi, iv);
+            } else {
+                // Skip unknown string/array/number value
+                if (pos < txt.size() && txt[pos] == '"') { std::string dummy; parseStr(dummy); }
+                else if (pos < txt.size() && txt[pos] == '[') {
+                    size_t e = txt.find(']', pos);
+                    pos = (e == std::string::npos) ? txt.size() : (e + 1);
+                } else {
+                    int32_t dummy = 0; if (!parseInt(dummy)) ++pos;
+                }
+            }
+        }
+
+        if (targetIdx < 0 && !targetName.empty()) {
+            for (int i = 0; i < addr::kUnitTypeCount; ++i) {
+                if (tbl[i].name && _stricmp(tbl[i].name, targetName.c_str()) == 0) {
+                    targetIdx = i;
+                    break;
+                }
+            }
+        }
+        if (targetIdx >= 0 && targetIdx < addr::kUnitTypeCount && !patches.empty()) {
+            for (const auto& kv : patches) {
+                tbl[targetIdx].f[kv.first] = kv.second;
+            }
+            applied++;
+            g_stats.unitOverrides++;
+        }
+    }
+
+    if (applied > 0) {
+        LogPrintf("[VFS-UNITS] Applied %d unit override(s) from %s\n", applied, jsonPath.c_str());
+    }
+}
+
+static void ApplyAllUnitOverridesLocked() {
+    RestoreStockUnitsLocked();
+    if (!g_cfg.enableMods) return;
+    for (const auto& modDir : g_mountedModDirs) {
+        std::string p = modDir + "\\units.json";
+        if (FileExists(p)) {
+            ApplyUnitsJsonFileLocked(p);
+        }
+    }
 }
 
 static ModFileEntry* LookupModEntryLocked(const char* rawPath) {
@@ -339,11 +507,12 @@ void VfsModInit() {
 
     EnterCriticalSection(&g_vfsLock);
     RebuildModIndexLocked();
+    ApplyAllUnitOverridesLocked();
     LeaveCriticalSection(&g_vfsLock);
 
     InstallJump(addr::CatalogLookup, reinterpret_cast<void*>(&Hook_CatalogLookup));
     InstallJump(addr::CrtFopen,      reinterpret_cast<void*>(&Hook_CrtFopen));
-    LogPrintf("[VFS] Modding VFS hooks installed (CatalogLookup 0x%X + CrtFopen 0x%X)\n",
+    LogPrintf("[VFS] Modding VFS hooks installed (CatalogLookup 0x%X + CrtFopen 0x%X + UnitType JSON overrides)\n",
               addr::CatalogLookup, addr::CrtFopen);
 }
 
@@ -351,6 +520,7 @@ void VfsModReload() {
     if (!g_vfsLockInited) return;
     EnterCriticalSection(&g_vfsLock);
     RebuildModIndexLocked();
+    ApplyAllUnitOverridesLocked();
     LeaveCriticalSection(&g_vfsLock);
 }
 

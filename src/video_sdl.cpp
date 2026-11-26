@@ -1,6 +1,7 @@
 #include "video_sdl.h"
 #include "overlay_ui.h"
 #include "glide_gl.h"
+#include "gunnery.h"
 #include "common.h"
 #include "gl_loader.h"
 #include "patch.h"
@@ -215,7 +216,7 @@ static bool InitGLResources() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glBindTexture(GL_TEXTURE_2D, 0);
 
-    OverlayInit();
+    OverlayInit(g_window, g_glCtx);
 
     LogPrintf("[GL] Renderer: %s | Version: %s\n",
               reinterpret_cast<const char*>(glGetString(GL_RENDERER)),
@@ -223,7 +224,7 @@ static bool InitGLResources() {
     return true;
 }
 
-static void MapWindowToGameCoords(float wx, float wy, int& gx, int& gy) {
+static void MapWindowToGameCoordsFloat(float wx, float wy, float& fx, float& fy, int& gx, int& gy) {
     bool is3D = (mem<uint32_t>(addr::g_RenderMode) == 1);
     int vx, vy, vw, vh;
     if (is3D && GlideIsHorPlusView()) {
@@ -237,8 +238,15 @@ static void MapWindowToGameCoords(float wx, float wy, int& gx, int& gy) {
     float ny = (vh > 0) ? ((wy - topY) / float(vh)) : 0.0f;
     nx = std::clamp(nx, 0.0f, 1.0f);
     ny = std::clamp(ny, 0.0f, 1.0f);
-    gx = std::clamp(int(nx * g_modeW), 0, g_modeW - 1);
-    gy = std::clamp(int(ny * g_modeH), 0, g_modeH - 1);
+    fx = nx * float(g_modeW);
+    fy = ny * float(g_modeH);
+    gx = std::clamp(int(fx), 0, g_modeW - 1);
+    gy = std::clamp(int(fy), 0, g_modeH - 1);
+}
+
+static void MapWindowToGameCoords(float wx, float wy, int& gx, int& gy) {
+    float fx, fy;
+    MapWindowToGameCoordsFloat(wx, wy, fx, fy, gx, gy);
 }
 
 static uint8_t* GetActivePrimaryPixels() {
@@ -422,8 +430,10 @@ int __cdecl Hook_MsgPump() {
                 break;
             }
             case SDL_EVENT_MOUSE_MOTION: {
+                float fx, fy;
                 int gx, gy;
-                MapWindowToGameCoords(ev.motion.x, ev.motion.y, gx, gy);
+                MapWindowToGameCoordsFloat(ev.motion.x, ev.motion.y, fx, fy, gx, gy);
+                GunneryOnMouseMotion(fx, fy, ev.motion.xrel, ev.motion.yrel);
                 uint32_t lp = (uint32_t(gy & 0xFFFF) << 16) | uint32_t(gx & 0xFFFF);
                 reinterpret_cast<MouseHandlerFn>(addr::MouseHandler)(g_mouseBtnMask, lp);
                 break;
@@ -663,6 +673,26 @@ void VideoGetViewport(bool is3D, int& vx, int& vy, int& vw, int& vh) {
     }
 
     if (is3D) {
+        // Dedicated Tactical Map / Battleplanner aspect when in UberMapScreen (view == 2)
+        if (mem<int32_t>(addr::g_CurrentView) == 2) {
+            int mapMode = g_cfg.mapAspectMode;
+            if (mapMode == ASPECT_FILL) {
+                vx = 0; vy = 0; vw = g_winW; vh = g_winH;
+                return;
+            }
+            if (mapMode == ASPECT_16_10) {
+                float targetAspect = 16.0f / 10.0f;
+                float winAspect = float(g_winW) / float(g_winH);
+                if (winAspect > targetAspect) {
+                    vh = g_winH; vw = int(g_winH * targetAspect + 0.5f); vx = (g_winW - vw) / 2; vy = 0;
+                } else {
+                    vw = g_winW; vh = int(g_winW / targetAspect + 0.5f); vx = 0; vy = (g_winH - vh) / 2;
+                }
+                return;
+            }
+            VideoGet43Viewport(vx, vy, vw, vh);
+            return;
+        }
         if (g_cfg.aspectMode == ASPECT3D_STRETCH || GlideIsHorPlusView()) {
             vx = 0; vy = 0; vw = g_winW; vh = g_winH;
             return;
@@ -716,6 +746,7 @@ void VideoDrawFullscreenQuad() {
 
 void VideoPresentSwap() {
     if (!g_window) return;
+    GunnerySyncRelativeMouse(g_window, OverlayIsOpen());
     OverlayRender(g_winW, g_winH);
     SDL_GL_SwapWindow(g_window);
 

@@ -84,6 +84,7 @@ python (Join-Path $tools "pack_installer.py") $stubExe $setupExe `
     "m1tp2_native.exe=$build\m1tp2_native.exe" `
     "SDL3.dll=$build\SDL3.dll" `
     "THIRD_PARTY_LICENSES.txt=$repoRoot\THIRD_PARTY_LICENSES.txt" `
+    "docs\M1TP2_Quickstart_Keys.png=$repoRoot\docs\M1TP2_Quickstart_Keys.png" `
     "mods\README_MODS.txt=$modsReadme" `
     "tools\m1tp2_modtool.py=$tools\m1tp2_modtool.py"
 if ($LASTEXITCODE -ne 0) { throw "Failed to pack installer!" }
@@ -91,13 +92,14 @@ if ($LASTEXITCODE -ne 0) { throw "Failed to pack installer!" }
 # 5. Build Portable ZIP
 $portDir = Join-Path $build "portable_stage"
 if (Test-Path $portDir) { Remove-Item -Recurse -Force $portDir }
-New-Item -ItemType Directory -Force -Path "$portDir\mods", "$portDir\tools" | Out-Null
+New-Item -ItemType Directory -Force -Path "$portDir\mods", "$portDir\tools", "$portDir\docs" | Out-Null
 Copy-Item "$build\ddraw.dll"                "$portDir\ddraw.dll"
 Copy-Item "$build\m1tp2_recomp.dll"         "$portDir\m1tp2_recomp.dll"
 Copy-Item "$build\m1tp2_native.exe"         "$portDir\m1tp2_native.exe"
 Copy-Item "$build\SDL3.dll"                 "$portDir\SDL3.dll"
 Copy-Item "$repoRoot\THIRD_PARTY_LICENSES.txt" "$portDir\THIRD_PARTY_LICENSES.txt"
 Copy-Item "$repoRoot\README.md"             "$portDir\README_NATIVE.md"
+Copy-Item "$repoRoot\docs\M1TP2_Quickstart_Keys.png" "$portDir\docs\M1TP2_Quickstart_Keys.png"
 Copy-Item "$modsReadme"                     "$portDir\mods\README_MODS.txt"
 Copy-Item "$tools\m1tp2_modtool.py"         "$portDir\tools\m1tp2_modtool.py"
 

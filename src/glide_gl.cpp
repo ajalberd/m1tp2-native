@@ -500,7 +500,16 @@ static void BindGlideTargetAndState() {
     gl::Uniform1i(g_uChromakeyEn, g_chromakeyEn ? 1 : 0);
 
     bool fogActive = g_fogEn && (g_cfg.fogMode != FOG_OFF);
-    float fogMult = (g_cfg.fogMode == FOG_EXT_4X) ? 4.0f : (g_cfg.fogMode == FOG_EXT_2X ? 2.0f : 1.0f);
+    float fogMult = 1.0f;
+    if (g_cfg.fogMode == FOG_EXT_4X) {
+        fogMult = 4.0f;
+    } else if (g_cfg.fogMode == FOG_EXT_2X) {
+        fogMult = 2.0f;
+    } else {
+        // Auto-scale default fog smoothly with Extended Draw Distance so distant hills/tanks are visible
+        static const float kAutoFogScale[4] = { 1.0f, 1.5f, 2.2f, 3.2f };
+        fogMult = kAutoFogScale[std::clamp(g_cfg.drawDistMode, 0, 3)];
+    }
     float fr, fg, fb, fa;
     UnpackARGB(g_fogColorARGB, fr, fg, fb, fa);
     gl::Uniform1i(g_uFogEn, fogActive ? 1 : 0);
@@ -934,8 +943,45 @@ struct M1Vertex3D {
 };
 static_assert(offsetof(M1Vertex3D, flags) == 0x1E, "M1Vertex3D flags offset mismatch");
 
+static int32_t g_last3dzCullHalfW = 320;
+
+static void Sync3dzHorizontalCull(int32_t focalX) {
+    // 0x44DF51: mov ecx, 320 (0x140) -> widen inversely with focalX (+5% margin) so 3D vehicles/trees
+    // never pop out at the left/right edges of 16:9 / 21:9 Hor+ views!
+    int32_t wantHalfW = (focalX < 512)
+        ? std::clamp(static_cast<int32_t>(std::lround((320.0 * 512.0 / focalX) * 1.05)), 320, 960)
+        : 320;
+    if (wantHalfW != g_last3dzCullHalfW) {
+        g_last3dzCullHalfW = wantHalfW;
+        WriteBytes(addr::Patch3dzCullHalfWImm, &wantHalfW, sizeof(wantHalfW));
+    }
+}
+
+static void ApplyDrawDistanceAndLod() {
+    int mode = std::clamp(g_cfg.drawDistMode, 0, 3);
+    // 0x4447D6: mov eax, imm32 (added to 0x177000 for total terrain + vehicle render box half-extent)
+    static const uint32_t kDrawBaseImm[4] = {
+        0x0007D000u, // 0: Default 2.0 km (0x1F4000)
+        0x00177000u, // 1: Extended 3.0 km (0x2EE000)
+        0x00271000u, // 2: Long 4.0 km (0x3E8000)
+        0x00465000u, // 3: Max 6.0 km (0x5DC000)
+    };
+    static const int32_t kLodStep[4] = {
+        179200,      // 1x stock
+        358400,      // 2x high-detail terrain distance
+        537600,      // 3x ultra terrain distance
+        716800,      // 4x max terrain distance
+    };
+    uint32_t imm = kDrawBaseImm[mode];
+    WriteBytes(addr::PatchDrawRadiusImm, &imm, sizeof(imm));
+    mem<int32_t>(addr::g_TerrainLodStep) = kLodStep[mode];
+}
+
 static int32_t ComputeHorPlusFocalX() {
-    if (!GlideIsHorPlusView()) return 512;
+    if (!GlideIsHorPlusView()) {
+        Sync3dzHorizontalCull(512);
+        return 512;
+    }
     int32_t clipW = mem<int32_t>(addr::g_ClipRight) - mem<int32_t>(addr::g_ClipLeft) + 1;
     if (clipW < 600) return 512; // Keep sub-viewports (interior monitors/CITV) untouched
     int winW = 0, winH = 0;
@@ -943,9 +989,13 @@ static int32_t ComputeHorPlusFocalX() {
     if (winW <= 0 || winH <= 0) return 512;
     double winAspect = static_cast<double>(winW) / static_cast<double>(winH);
     constexpr double kBaseAspect = 4.0 / 3.0;
-    if (winAspect <= kBaseAspect + 0.01) return 512;
-    int32_t fx = static_cast<int32_t>(std::lround(512.0 * (kBaseAspect / winAspect)));
-    return std::clamp(fx, 180, 512);
+    if (winAspect <= kBaseAspect + 0.01) {
+        Sync3dzHorizontalCull(512);
+        return 512;
+    }
+    int32_t fx = std::clamp(static_cast<int32_t>(std::lround(512.0 * (kBaseAspect / winAspect))), 180, 512);
+    Sync3dzHorizontalCull(fx);
+    return fx;
 }
 
 extern "C" void __cdecl Impl_ClassifyFrustumVertex(M1Vertex3D* v) {
@@ -1075,6 +1125,7 @@ const char* GlideGetViewName(int viewId) {
 
 void GlideApplySettings() {
     g_fboDirty = true;
+    ApplyDrawDistanceAndLod();
 }
 
 void GlideGLInstallHooks() {
@@ -1082,7 +1133,8 @@ void GlideGLInstallHooks() {
     InstallCall(addr::D3DInitCallSite,       reinterpret_cast<void*>(&Hook_D3DInitRedirect));
     InstallJump(addr::ClassifyFrustumVertex, reinterpret_cast<void*>(&Thunk_ClassifyFrustumVertex));
     InstallJump(addr::Project3DVertex,       reinterpret_cast<void*>(&Thunk_Project3DVertex));
-    LogPrintf("[GLIDE-GL] LoadGlide2x, D3D->Glide redirect & True Hor+ 3D projection hooks installed\n");
+    ApplyDrawDistanceAndLod();
+    LogPrintf("[GLIDE-GL] LoadGlide2x, True Hor+ 3D, 3DZ cull fix & Extended Draw Distance/LOD hooks installed\n");
 }
 
 void GlideGLShutdown() {

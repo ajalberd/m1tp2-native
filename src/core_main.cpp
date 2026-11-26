@@ -1,6 +1,8 @@
 #include "common.h"
 #include "heap_guard.h"
 #include "vfs_mod.h"
+#include "campaign_hud.h"
+#include "gunnery.h"
 #include "video_sdl.h"
 #include "glide_gl.h"
 #include <windows.h>
@@ -88,18 +90,26 @@ void LoadConfig() {
             if (_stricmp(key, "VSync") == 0)           g_cfg.vsync           = (std::atoi(val) != 0);
             if (_stricmp(key, "MenuAspectMode") == 0)  g_cfg.menuAspectMode  = std::atoi(val);
             if (_stricmp(key, "AspectMode") == 0)      g_cfg.aspectMode      = std::atoi(val);
+            if (_stricmp(key, "MapAspectMode") == 0)   g_cfg.mapAspectMode   = std::atoi(val);
             if (_stricmp(key, "MSAA") == 0)            g_cfg.msaaSamples     = std::atoi(val);
             if (_stricmp(key, "Anisotropy") == 0)      g_cfg.anisotropy      = std::atoi(val);
             if (_stricmp(key, "TexFilter3D") == 0)     g_cfg.texFilter3D     = std::atoi(val);
             if (_stricmp(key, "LinearFilter") == 0 ||
                 _stricmp(key, "LinearFilter2D") == 0)  g_cfg.linearFilter2D  = (std::atoi(val) != 0);
             if (_stricmp(key, "LinearFilterLfb") == 0) g_cfg.linearFilterLfb = (std::atoi(val) != 0);
+            if (_stricmp(key, "DrawDistance") == 0)    g_cfg.drawDistMode    = std::atoi(val);
             if (_stricmp(key, "FogMode") == 0)         g_cfg.fogMode         = std::atoi(val);
             if (_stricmp(key, "Gamma") == 0)           g_cfg.gamma           = static_cast<float>(std::atof(val));
             if (_stricmp(key, "ForceGlideOnD3D") == 0) g_cfg.forceGlideOnD3D = (std::atoi(val) != 0);
-            if (_stricmp(key, "SkipIntro") == 0)       g_cfg.skipIntro       = (std::atoi(val) != 0);
-            if (_stricmp(key, "EnableMods") == 0)      g_cfg.enableMods      = (std::atoi(val) != 0);
-            if (_stricmp(key, "ShowStatsHud") == 0)    g_cfg.showStatsHud    = (std::atoi(val) != 0);
+            if (_stricmp(key, "SkipIntro") == 0)             g_cfg.skipIntro             = (std::atoi(val) != 0);
+            if (_stricmp(key, "ShowLauncherOnStartup") == 0) g_cfg.showLauncherOnStartup = (std::atoi(val) != 0);
+            if (_stricmp(key, "EnableMods") == 0)            g_cfg.enableMods            = (std::atoi(val) != 0);
+            if (_stricmp(key, "FixCampaignFrontBug") == 0)   g_cfg.fixCampaignFrontBug   = (std::atoi(val) != 0);
+            if (_stricmp(key, "CampaignIntelHud") == 0)      g_cfg.campaignIntelHud      = (std::atoi(val) != 0);
+            if (_stricmp(key, "GunnerMouseMode") == 0)       g_cfg.gunnerMouseMode       = std::atoi(val);
+            if (_stricmp(key, "GunnerMouseSens") == 0)       g_cfg.gunnerMouseSens       = static_cast<float>(std::atof(val));
+            if (_stricmp(key, "BallisticLeadMode") == 0)     g_cfg.ballisticLeadMode     = std::atoi(val);
+            if (_stricmp(key, "ShowStatsHud") == 0)          g_cfg.showStatsHud          = (std::atoi(val) != 0);
         }
     }
     std::fclose(f);
@@ -120,6 +130,8 @@ void SaveConfig() {
     std::fprintf(f, "MenuAspectMode = %d\n", g_cfg.menuAspectMode);
     std::fprintf(f, "# AspectMode (3D Combat): 0=SmartHor+ (Default), 1=All3DHor+, 2=4:3, 3=Stretch\n");
     std::fprintf(f, "AspectMode = %d\n", g_cfg.aspectMode);
+    std::fprintf(f, "# MapAspectMode (Battleplanner / IVIS Map): 0=FillScreen, 1=4:3 (Default), 2=16:10\n");
+    std::fprintf(f, "MapAspectMode = %d\n", g_cfg.mapAspectMode);
     std::fprintf(f, "# MSAA: 0, 2, 4, 8\n");
     std::fprintf(f, "MSAA = %d\n", g_cfg.msaaSamples);
     std::fprintf(f, "# Anisotropy: 1, 2, 4, 8, 16\n");
@@ -128,12 +140,22 @@ void SaveConfig() {
     std::fprintf(f, "TexFilter3D = %d\n", g_cfg.texFilter3D);
     std::fprintf(f, "LinearFilter2D = %d\n", g_cfg.linearFilter2D ? 1 : 0);
     std::fprintf(f, "LinearFilterLfb = %d\n", g_cfg.linearFilterLfb ? 1 : 0);
-    std::fprintf(f, "# FogMode: 0=Default, 1=2xExtended, 2=4xExtended, 3=Off\n");
+    std::fprintf(f, "# DrawDistance: 0=2km(Default), 1=3km(Extended), 2=4km(Long), 3=6km(Max)\n");
+    std::fprintf(f, "DrawDistance = %d\n", g_cfg.drawDistMode);
+    std::fprintf(f, "# FogMode: 0=Auto, 1=2xExtended, 2=4xExtended, 3=Off\n");
     std::fprintf(f, "FogMode = %d\n", g_cfg.fogMode);
     std::fprintf(f, "Gamma = %.2f\n", g_cfg.gamma);
     std::fprintf(f, "ForceGlideOnD3D = %d\n", g_cfg.forceGlideOnD3D ? 1 : 0);
     std::fprintf(f, "SkipIntro = %d\n", g_cfg.skipIntro ? 1 : 0);
+    std::fprintf(f, "ShowLauncherOnStartup = %d\n", g_cfg.showLauncherOnStartup ? 1 : 0);
     std::fprintf(f, "EnableMods = %d\n", g_cfg.enableMods ? 1 : 0);
+    std::fprintf(f, "FixCampaignFrontBug = %d\n", g_cfg.fixCampaignFrontBug ? 1 : 0);
+    std::fprintf(f, "CampaignIntelHud = %d\n", g_cfg.campaignIntelHud ? 1 : 0);
+    std::fprintf(f, "# GunnerMouseMode: 0=PrecisionStick (Default), 1=DirectRawMouse, 2=Stock1998\n");
+    std::fprintf(f, "GunnerMouseMode = %d\n", g_cfg.gunnerMouseMode);
+    std::fprintf(f, "GunnerMouseSens = %.2f\n", g_cfg.gunnerMouseSens);
+    std::fprintf(f, "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n");
+    std::fprintf(f, "BallisticLeadMode = %d\n", g_cfg.ballisticLeadMode);
     std::fprintf(f, "ShowStatsHud = %d\n", g_cfg.showStatsHud ? 1 : 0);
     std::fclose(f);
 }
@@ -146,6 +168,8 @@ extern "C" __declspec(dllexport) void __cdecl M1TP2_RecompInit() {
     AddVectoredExceptionHandler(1, m1::CrashHandler);
     m1::HeapGuardInit();
     m1::VfsModInit();
+    m1::CampaignInstallHooks();
+    m1::GunneryInstallHooks();
     m1::VideoSDLInstallHooks();
     m1::GlideGLInstallHooks();
     m1::LogPrintf("[CORE] All native replacement hooks installed successfully.\n");

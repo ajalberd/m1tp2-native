@@ -3,13 +3,13 @@
 
 namespace m1 {
 
-void OverlayInit();
+void OverlayInit(SDL_Window* window, SDL_GLContext glCtx);
 void OverlayShutdown();
 bool OverlayIsOpen();
 void OverlayToggle();
 // Returns true if the event was consumed by the Recomp menu
 bool OverlayHandleEvent(const SDL_Event& ev);
-// Renders both the optional FPS HUD and the F12 Recomp Settings Menu in OpenGL 3.3
+// Renders Campaign Intel HUD, optional FPS HUD, and the F12 Dear ImGui Recomp Menu
 void OverlayRender(int winW, int winH);
 
 } // namespace m1
