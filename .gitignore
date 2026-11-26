@@ -1,0 +1,22 @@
+# Build & Release outputs
+build/
+dist/
+*.pdb
+*.lib
+*.exp
+*.obj
+*.o
+
+# Third-party downloaded SDKs (auto-fetched by build.ps1)
+third_party/
+
+# Compiled binaries (published via GitHub Releases, not tracked in git)
+*.dll
+*.exe
+*.zip
+
+# Local logs & user configs
+*.log
+m1tp2_recomp.ini
+.DS_Store
+Thumbs.db
