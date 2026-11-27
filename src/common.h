@@ -58,7 +58,28 @@ namespace addr {
     constexpr uint32_t TrackedFreeCurGen    = 0x4115F0;
     constexpr uint32_t GlideInitBadFreeCall = 0x423263;
     constexpr uint32_t CrtFree              = 0x45C730;
+    constexpr uint32_t CrtSbhFindBlock      = 0x45FBD0;
+    constexpr uint32_t CrtSbhFreeBlock      = 0x45FC30;
+    constexpr uint32_t g_CrtHeapHandle      = 0x88E354;
     constexpr uint32_t CrtExit              = 0x45CD50;
+
+    // WinMM Joystick IAT & state
+    constexpr uint32_t IatJoyGetPosEx       = 0x88F430;
+    constexpr uint32_t IatJoyGetDevCapsA    = 0x88F434;
+    constexpr uint32_t g_JoyInitState       = 0x4D95C4;
+
+    // Frame Timing & 100 FPS High-Precision Timer
+    constexpr uint32_t GetTicks10ms         = 0x438CB0; // stock: GetTickCount() / 10 (15.6ms Win32 quantum)
+    constexpr uint32_t PatchFrameCapImm     = 0x41E386; // imm8 in `83 F8 01 7E E9` (cmp eax, 1; jle) -> 0x00 = 100 FPS
+
+    // MPSSNDR.DLL Audio Wrapper & Function Table
+    constexpr uint32_t SndLoad              = 0x449C10; // calls [0x571478] LoadSnd(slot, path, params)
+    constexpr uint32_t SndPlay              = 0x449C60; // calls [0x571484] PlaySnd(slot, params)
+    constexpr uint32_t SndSetVol            = 0x449CF0; // calls [0x5714A0] SetVol(slot, vol 0..400)
+    constexpr uint32_t g_SndInitState       = 0x4D9580; // 0=uninit, 1=active, 2=paused
+    constexpr uint32_t g_SndFnLoad          = 0x571478;
+    constexpr uint32_t g_SndFnPlay          = 0x571484;
+    constexpr uint32_t g_SndFnSetVol        = 0x5714A0;
 
     // Catalog / VFS & CRT File I/O
     constexpr uint32_t CatalogFindEntry      = 0x4270D0;
@@ -69,7 +90,9 @@ namespace addr {
 
     // Draw Distance, LOD, 3DZ Widescreen Cull & Unit Data Table
     constexpr uint32_t PatchDrawRadiusImm    = 0x4447D6; // mov eax, imm32 (stock 0x7D000 + 0x177000 = 2.0 km)
-    constexpr uint32_t Patch3dzCullHalfWImm  = 0x44DF51; // mov ecx, imm32 (stock 320 = 0x140)
+    constexpr uint32_t Patch3dzCullTail      = 0x44DF1D; // tail of 0x44DEC0 after camX/Y/Z computed (replaces 32-bit shl-9 overflow cull)
+    constexpr uint32_t g_3dzCullCtxPtr       = 0x565A1C; // active 3DZ render context pointer
+    constexpr uint32_t g_3dzPosShift         = 0x4D9BBC; // right-shift applied to 3DZ world delta
     constexpr uint32_t g_TerrainLodStep      = 0x4AFF2C; // stock 179200 (0x2BC00)
     constexpr uint32_t g_UnitTypeTable       = 0x479A80; // 94 UnitType structs, stride 0x80
     constexpr int      kUnitTypeCount        = 94;
@@ -180,10 +203,18 @@ enum AspectMode : int {
 };
 
 enum Aspect3DMode : int {
-    ASPECT3D_SMART_HORPLUS = 0, // True Hor+ 16:9 in Chase/Hatch/Ext; crisp 4:3 in Cockpits/Sights/Map
-    ASPECT3D_ALL_HORPLUS   = 1, // True Hor+ 16:9 also in GPS Sight & Vision Blocks (Cockpits/GAS/Map stay 4:3)
+    ASPECT3D_SMART_HORPLUS = 0, // True Hor+ widescreen in Chase/Hatch/Ext; crisp 4:3 in Cockpits/Sights/Map
+    ASPECT3D_ALL_HORPLUS   = 1, // True Hor+ widescreen also in GPS Sight & Vision Blocks (Cockpits/GAS/Map stay 4:3)
     ASPECT3D_4_3           = 2, // Classic 4:3 everywhere
     ASPECT3D_STRETCH       = 3, // Legacy full-screen stretch
+};
+
+enum MapAspectOpt : int {
+    MAP_ASPECT_AUTO_NATIVE = 0, // Automatic aspect-native 4:3 (zero stretch on 16:9 / 21:9 / 32:9)
+    MAP_ASPECT_4_3_LEGACY  = 1, // Legacy v0.2.0 value (normalized to MAP_ASPECT_AUTO_NATIVE)
+    MAP_ASPECT_16_10       = 2, // Capped 16:10 wide (pillarboxed on 16:9 / 21:9)
+    MAP_ASPECT_16_9        = 3, // Capped 16:9 wide (pillarboxed on 21:9)
+    MAP_ASPECT_STRETCH     = 4, // Stretch to full monitor width
 };
 
 enum TexFilterMode : int {
@@ -224,9 +255,10 @@ struct Config {
     int  windowHeight     = 0;
     bool fullscreen       = true;  // Borderless fullscreen at native monitor resolution
     bool vsync            = true;
+    bool unlock100Fps     = true;  // High-precision QPC 10ms timer + 100 FPS cap (stock: 50 FPS / 36 FPS on 144Hz)
     int  menuAspectMode   = ASPECT_4_3;             // Keep 2D menus / briefings clean 4:3
     int  aspectMode       = ASPECT3D_SMART_HORPLUS; // True Hor+ widescreen in wide views, 4:3 in cockpits/sights
-    int  mapAspectMode    = ASPECT_4_3;             // Independent Tactical Map / Battleplanner aspect
+    int  mapAspectMode    = MAP_ASPECT_AUTO_NATIVE; // Aspect-native Tactical Map / Battleplanner (auto 4:3, zero stretch)
     int  msaaSamples      = 4;     // 0, 2, 4, 8
     int  anisotropy       = 16;    // 1, 2, 4, 8, 16
     int  texFilter3D      = TEXFILT_TRILINEAR;
@@ -244,6 +276,13 @@ struct Config {
     int  gunnerMouseMode       = GUNNER_PRECISION_STICK;
     float gunnerMouseSens      = 1.0f;  // 0.25x .. 3.00x
     int  ballisticLeadMode     = LEAD_SMOOTH_FCS;
+    bool disableJoystick       = true;  // Ignore WinMM joysticks/HOTAS/gamepads unless enabled
+    bool  audioMute            = false;
+    float audioMasterVol       = 1.0f;  // 0.00 .. 1.00
+    float audioMusicVol        = 1.0f;  // Menu / briefing / victory music
+    float audioSfxVol          = 1.0f;  // Weapons, explosions, UI clicks
+    float audioEngineVol       = 1.0f;  // Turbine, diesel, treads, turret motor
+    float audioVoiceVol        = 1.0f;  // Crew radio & speech
     bool showStatsHud          = false;
 };
 

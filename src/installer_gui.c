@@ -11,7 +11,7 @@
 #include <stdlib.h>
 
 #define APP_TITLE       "M1 Tank Platoon II - Native Setup"
-#define APP_VERSION     "v0.2.0"
+#define APP_VERSION     "v0.3.0"
 #define PAYLOAD_MAGIC   "M1NATV01"
 
 #define IDC_PATH_EDIT   101
@@ -277,12 +277,13 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 "WindowHeight = 0\n"
                 "Fullscreen = 1\n"
                 "VSync = 1\n"
+                "Unlock100Fps = 1\n"
                 "# MenuAspectMode: 0=FillScreen, 1=4:3 (Default), 2=16:10, 3=CropZoom\n"
                 "MenuAspectMode = 1\n"
                 "# AspectMode (3D Combat): 0=SmartHor+ (Default), 1=All3DHor+, 2=4:3, 3=Stretch\n"
                 "AspectMode = 0\n"
-                "# MapAspectMode (Battleplanner / IVIS Map): 0=FillScreen, 1=4:3 (Default), 2=16:10\n"
-                "MapAspectMode = 1\n"
+                "# MapAspectMode (Battleplanner / IVIS Map): 0=AutoNative4:3 (Default), 2=16:10, 3=16:9, 4=Stretch\n"
+                "MapAspectMode = 0\n"
                 "MSAA = 4\n"
                 "Anisotropy = 16\n"
                 "TexFilter3D = 0\n"
@@ -303,6 +304,13 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 "GunnerMouseSens = 1.00\n"
                 "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n"
                 "BallisticLeadMode = 0\n"
+                "DisableJoystick = 1\n"
+                "AudioMute = 0\n"
+                "AudioMasterVol = 1.00\n"
+                "AudioMusicVol = 1.00\n"
+                "AudioSfxVol = 1.00\n"
+                "AudioEngineVol = 1.00\n"
+                "AudioVoiceVol = 1.00\n"
                 "ShowStatsHud = 0\n",
                 enableGlideAndSkipIntro ? 1 : 0);
             fclose(f);

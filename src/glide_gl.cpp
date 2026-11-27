@@ -1,5 +1,6 @@
 #include "glide_gl.h"
 #include "video_sdl.h"
+#include "heap_guard.h"
 #include "gl_loader.h"
 #include "common.h"
 #include "patch.h"
@@ -124,6 +125,8 @@ bool     g_texClampS = false; // 0 = WRAP (GL_REPEAT) by default in M1TP2!
 bool     g_texClampT = false;
 bool     g_blendEn   = false;
 uint32_t g_curTexAddr = 0xFFFFFFFFu;
+float    g_curTexMaxS = 256.0f;
+float    g_curTexMaxT = 256.0f;
 
 uint32_t g_palRGBA[256] = {};
 
@@ -131,6 +134,8 @@ struct TexSlot {
     GLuint glTex = 0;
     int    width = 0;
     int    height = 0;
+    float  maxS = 256.0f;
+    float  maxT = 256.0f;
     std::vector<uint8_t> rawIdx;
 };
 std::unordered_map<uint32_t, TexSlot> g_texCache;
@@ -142,6 +147,8 @@ uint16_t g_lfb565[LFB_W * LFB_H] = {};
 uint32_t g_lfbRGBA[LFB_W * LFB_H] = {};
 uint16_t g_lfbSentinel = 0x0001;
 bool     g_lfbWrittenThisFrame = false;
+bool     g_lfbHasPixels = false;
+bool     g_lfbLockWritePending = false;
 bool     g_glideOpen = false;
 bool     g_glInited  = false;
 
@@ -424,6 +431,116 @@ static void ClearLfbOverlay() {
     g_lfbSentinel = PickUnusedLfbSentinel();
     std::fill_n(g_lfb565, LFB_W * LFB_H, g_lfbSentinel);
     g_lfbWrittenThisFrame = false;
+    g_lfbHasPixels = false;
+    g_lfbLockWritePending = false;
+}
+
+static bool CheckLfbHasPixels(bool clearPending) {
+    if (!g_lfbHasPixels && g_lfbLockWritePending) {
+        const uint16_t sentinel = g_lfbSentinel;
+        for (int i = 0; i < LFB_W * LFB_H; ++i) {
+            if (g_lfb565[i] != sentinel) {
+                g_lfbHasPixels = true;
+                break;
+            }
+        }
+    }
+    if (clearPending) {
+        g_lfbLockWritePending = false;
+    }
+    return g_lfbHasPixels;
+}
+
+static int ResolveColorCombineMode();
+
+static uint16_t ResolveCurrentGlideColor565(const GrVertex& v) {
+    uint32_t r8 = 255, g8 = 255, b8 = 255;
+    int mode = ResolveColorCombineMode();
+    if (mode == 1) {
+        r8 = std::isfinite(v.r) ? static_cast<uint32_t>(std::clamp(std::lround(v.r), 0L, 255L)) : 255u;
+        g8 = std::isfinite(v.g) ? static_cast<uint32_t>(std::clamp(std::lround(v.g), 0L, 255L)) : 255u;
+        b8 = std::isfinite(v.b) ? static_cast<uint32_t>(std::clamp(std::lround(v.b), 0L, 255L)) : 255u;
+    } else if (mode == 5) {
+        r8 = g8 = b8 = 0u;
+    } else {
+        r8 = (g_constColorARGB >> 16) & 0xFFu;
+        g8 = (g_constColorARGB >> 8)  & 0xFFu;
+        b8 =  g_constColorARGB        & 0xFFu;
+    }
+    uint16_t c565 = static_cast<uint16_t>(((r8 >> 3) << 11) | ((g8 >> 2) << 5) | (b8 >> 3));
+    if (c565 == g_lfbSentinel) {
+        c565 ^= 0x0001u;
+    }
+    return c565;
+}
+
+static inline void PutLfbPixel(int x, int y, uint16_t c565) {
+    if (x >= 0 && x < LFB_W && y >= 0 && y < LFB_H) {
+        g_lfb565[y * LFB_W + x] = c565;
+    }
+}
+
+static void RasterizeLfbLine(float fx0, float fy0, float fx1, float fy1, uint16_t c565) {
+    if (!std::isfinite(fx0) || !std::isfinite(fy0) || !std::isfinite(fx1) || !std::isfinite(fy1)) return;
+
+    // Cohen-Sutherland clip to [0, LFB_W - 1] x [0, LFB_H - 1]
+    constexpr float kMinX = 0.0f, kMaxX = float(LFB_W - 1);
+    constexpr float kMinY = 0.0f, kMaxY = float(LFB_H - 1);
+    auto outCode = [](float x, float y) -> int {
+        int code = 0;
+        if (x < kMinX)      code |= 1;
+        else if (x > kMaxX) code |= 2;
+        if (y < kMinY)      code |= 4;
+        else if (y > kMaxY) code |= 8;
+        return code;
+    };
+
+    int c0 = outCode(fx0, fy0);
+    int c1 = outCode(fx1, fy1);
+    while (true) {
+        if ((c0 | c1) == 0) break;
+        if ((c0 & c1) != 0) return;
+        int cOut = c0 ? c0 : c1;
+        float x = 0.0f, y = 0.0f;
+        float dx = fx1 - fx0;
+        float dy = fy1 - fy0;
+        if (cOut & 8) {
+            x = (std::fabs(dy) > 1e-6f) ? (fx0 + dx * (kMaxY - fy0) / dy) : fx0;
+            y = kMaxY;
+        } else if (cOut & 4) {
+            x = (std::fabs(dy) > 1e-6f) ? (fx0 + dx * (kMinY - fy0) / dy) : fx0;
+            y = kMinY;
+        } else if (cOut & 2) {
+            y = (std::fabs(dx) > 1e-6f) ? (fy0 + dy * (kMaxX - fx0) / dx) : fy0;
+            x = kMaxX;
+        } else {
+            y = (std::fabs(dx) > 1e-6f) ? (fy0 + dy * (kMinX - fx0) / dx) : fy0;
+            x = kMinX;
+        }
+        if (cOut == c0) {
+            fx0 = x; fy0 = y; c0 = outCode(fx0, fy0);
+        } else {
+            fx1 = x; fy1 = y; c1 = outCode(fx1, fy1);
+        }
+    }
+
+    int x0 = std::clamp(static_cast<int>(std::lround(fx0)), 0, LFB_W - 1);
+    int y0 = std::clamp(static_cast<int>(std::lround(fy0)), 0, LFB_H - 1);
+    int x1 = std::clamp(static_cast<int>(std::lround(fx1)), 0, LFB_W - 1);
+    int y1 = std::clamp(static_cast<int>(std::lround(fy1)), 0, LFB_H - 1);
+
+    int dx = std::abs(x1 - x0);
+    int dy = -std::abs(y1 - y0);
+    int sx = (x0 < x1) ? 1 : -1;
+    int sy = (y0 < y1) ? 1 : -1;
+    int err = dx + dy;
+    while (true) {
+        PutLfbPixel(x0, y0, c565);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
 }
 
 static void UnpackARGB(uint32_t c, float& r, float& g, float& b, float& a) {
@@ -574,8 +691,8 @@ static GLVert ConvertVertex(const GrVertex& v) {
     float oow = (std::isfinite(v.oow) && v.oow > 1e-7f) ? v.oow : 1.0f;
     float w = 1.0f / oow;
     out.w = w;
-    out.u = (std::isfinite(v.tmuvtx[0].sow) ? (v.tmuvtx[0].sow * w) : 0.0f) / 256.0f;
-    out.v = (std::isfinite(v.tmuvtx[0].tow) ? (v.tmuvtx[0].tow * w) : 0.0f) / 256.0f;
+    out.u = (std::isfinite(v.tmuvtx[0].sow) ? (v.tmuvtx[0].sow * w) : 0.0f) / g_curTexMaxS;
+    out.v = (std::isfinite(v.tmuvtx[0].tow) ? (v.tmuvtx[0].tow * w) : 0.0f) / g_curTexMaxT;
     return out;
 }
 
@@ -592,7 +709,7 @@ static void DrawVerts(GLenum prim, const GLVert* verts, int count) {
 }
 
 static void CompositeLfbOverlay() {
-    if (!g_lfbWrittenThisFrame) return;
+    if (!g_lfbWrittenThisFrame || !CheckLfbHasPixels(false)) return;
 
     for (int i = 0; i < LFB_W * LFB_H; ++i) {
         uint16_t p = g_lfb565[i];
@@ -731,6 +848,32 @@ void __stdcall gl_grBufferSwap(int) {
                             vx, vy, vx + bw, vy + bh,
                             GL_COLOR_BUFFER_BIT, GL_NEAREST);
         gl::BindFramebuffer(GL_FRAMEBUFFER, 0);
+    } else {
+        // When MSAA is disabled, keep pillarbox/letterbox margins cleanly black on aspect transitions
+        int winW, winH;
+        VideoGetWindowSize(winW, winH);
+        if (vx > 0 || vy > 0 || vw < winW || vh < winH) {
+            gl::BindFramebuffer(GL_FRAMEBUFFER, 0);
+            glEnable(GL_SCISSOR_TEST);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            if (vx > 0) {
+                glScissor(0, 0, vx, winH);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            if (vx + vw < winW) {
+                glScissor(vx + vw, 0, winW - (vx + vw), winH);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            if (vy > 0) {
+                glScissor(0, 0, winW, vy);
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            if (vy + vh < winH) {
+                glScissor(0, vy + vh, winW, winH - (vy + vh));
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+            glDisable(GL_SCISSOR_TEST);
+        }
     }
 
     CompositeLfbOverlay();
@@ -815,23 +958,72 @@ void __stdcall gl_grTexDownloadTable(int32_t, int32_t, void* data) {
     }
 }
 
+static uint32_t g_texClampWarnCount = 0;
+
 void __stdcall gl_grTexDownloadMipMap(int32_t, FxU32 startAddress, FxU32, GrTexInfo* info) {
     if (!info || !info->data) return;
     int dim = 256 >> std::clamp(info->largeLod, 0, 8);
     if (dim < 1) dim = 1;
 
+    // Exact Glide 2.43 aspect ratios:
+    //   0=8x1, 1=4x1, 2=2x1, 3=1x1, 4=1x2, 5=1x4, 6=1x8
+    int aspect = std::clamp(info->aspectRatio, 0, 6);
+    int w = dim;
+    int h = dim;
+    float maxS = 256.0f;
+    float maxT = 256.0f;
+    if (aspect < 3) {
+        int shift = 3 - aspect; // 1=2x1, 2=4x1, 3=8x1
+        h = std::max(1, dim >> shift);
+        maxT = 256.0f / static_cast<float>(1 << shift);
+    } else if (aspect > 3) {
+        int shift = aspect - 3; // 1=1x2, 2=1x4, 3=1x8
+        w = std::max(1, dim >> shift);
+        maxS = 256.0f / static_cast<float>(1 << shift);
+    }
+
     TexSlot& slot = g_texCache[startAddress];
     if (!slot.glTex) glGenTextures(1, &slot.glTex);
-    slot.width = dim;
-    slot.height = dim;
-    size_t n = static_cast<size_t>(dim) * static_cast<size_t>(dim);
-    slot.rawIdx.resize(n);
-    std::memcpy(slot.rawIdx.data(), info->data, n);
+    slot.width  = w;
+    slot.height = h;
+    slot.maxS   = maxS;
+    slot.maxT   = maxT;
+
+    size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+    slot.rawIdx.assign(n, 0);
+
+    // Guard against M1TP2's 0x42394D quirk (surfaces with height <= 16 inherit stale aspectRatio)
+    // or any undersized source allocation so memcpy can never read off the end of a page.
+    size_t avail = HeapGuardQueryReadableBytes(info->data);
+    size_t copyBytes = std::min(n, avail);
+    if (copyBytes < n) {
+        g_texClampWarnCount++;
+        if (g_texClampWarnCount <= 16) {
+            LogPrintf("[GLIDE-GL] Clamped texture upload at 0x%X (%dx%d aspect=%d lod=%d): requested=%zu avail=%zu ptr=%p\n",
+                      startAddress, w, h, aspect, info->largeLod, n, avail, info->data);
+        }
+    }
+    if (copyBytes > 0) {
+        std::memcpy(slot.rawIdx.data(), info->data, copyBytes);
+    }
     UploadExpandedTexture(slot);
+
+    if (g_curTexAddr == startAddress) {
+        g_curTexMaxS = slot.maxS;
+        g_curTexMaxT = slot.maxT;
+    }
 }
 
 void __stdcall gl_grTexSource(int32_t, FxU32 startAddress, FxU32, GrTexInfo*) {
     g_curTexAddr = startAddress;
+    auto it = g_texCache.find(startAddress);
+    if (it != g_texCache.end()) {
+        g_curTexMaxS = it->second.maxS;
+        g_curTexMaxT = it->second.maxT;
+    } else {
+        g_curTexMaxS = 256.0f;
+        g_curTexMaxT = 256.0f;
+    }
 }
 
 FxBool __stdcall gl_grLfbLock(int32_t type, int32_t, int32_t, int32_t, FxBool, GrLfbInfo* info) {
@@ -840,14 +1032,28 @@ FxBool __stdcall gl_grLfbLock(int32_t type, int32_t, int32_t, int32_t, FxBool, G
     info->strideInBytes = LFB_W * 2;
     info->writeMode     = GR_LFBWRITEMODE_565;
     info->origin        = 0;
-    if (type == GR_LFB_WRITE_ONLY) g_lfbWrittenThisFrame = true;
+    if (type == GR_LFB_WRITE_ONLY) {
+        g_lfbWrittenThisFrame = true;
+        g_lfbLockWritePending = true;
+    }
     return 1;
 }
 
-FxBool __stdcall gl_grLfbUnlock(int32_t, int32_t) { return 1; }
+FxBool __stdcall gl_grLfbUnlock(int32_t, int32_t) {
+    CheckLfbHasPixels(true);
+    return 1;
+}
 
 void __stdcall gl_grDrawPoint(const GrVertex* pt) {
     if (!pt) return;
+    if (CheckLfbHasPixels(false)) {
+        if (std::isfinite(pt->x) && std::isfinite(pt->y)) {
+            PutLfbPixel(static_cast<int>(std::lround(pt->x)),
+                        static_cast<int>(std::lround(pt->y)),
+                        ResolveCurrentGlideColor565(*pt));
+        }
+        return;
+    }
     GLVert v = ConvertVertex(*pt);
     glPointSize(std::max(2.0f, g_stats.renderH / 240.0f));
     DrawVerts(GL_POINTS, &v, 1);
@@ -855,6 +1061,17 @@ void __stdcall gl_grDrawPoint(const GrVertex* pt) {
 
 void __stdcall gl_grDrawLine(const GrVertex* v1, const GrVertex* v2) {
     if (!v1 || !v2) return;
+    // In real Glide, 2D HUD indicators (GPS/GAS tank hull & turret dial 0x435CB0, TC CITV azimuth lines)
+    // draw via grDrawLine AFTER the cockpit LFB mask is blitted. Rasterize them directly into g_lfb565
+    // so they appear in hardware-exact Z-order on top of the cockpit mask and under any later LFB cursor/frame.
+    if (CheckLfbHasPixels(false)) {
+        RasterizeLfbLine(v1->x, v1->y, v2->x, v2->y, ResolveCurrentGlideColor565(*v1));
+        return;
+    }
+    if (std::fabs(v1->x - v2->x) < 0.5f && std::fabs(v1->y - v2->y) < 0.5f) {
+        gl_grDrawPoint(v1);
+        return;
+    }
     GLVert vs[2] = { ConvertVertex(*v1), ConvertVertex(*v2) };
     glLineWidth(std::max(1.5f, g_stats.renderH / 480.0f));
     DrawVerts(GL_LINES, vs, 2);
@@ -943,20 +1160,6 @@ struct M1Vertex3D {
 };
 static_assert(offsetof(M1Vertex3D, flags) == 0x1E, "M1Vertex3D flags offset mismatch");
 
-static int32_t g_last3dzCullHalfW = 320;
-
-static void Sync3dzHorizontalCull(int32_t focalX) {
-    // 0x44DF51: mov ecx, 320 (0x140) -> widen inversely with focalX (+5% margin) so 3D vehicles/trees
-    // never pop out at the left/right edges of 16:9 / 21:9 Hor+ views!
-    int32_t wantHalfW = (focalX < 512)
-        ? std::clamp(static_cast<int32_t>(std::lround((320.0 * 512.0 / focalX) * 1.05)), 320, 960)
-        : 320;
-    if (wantHalfW != g_last3dzCullHalfW) {
-        g_last3dzCullHalfW = wantHalfW;
-        WriteBytes(addr::Patch3dzCullHalfWImm, &wantHalfW, sizeof(wantHalfW));
-    }
-}
-
 static void ApplyDrawDistanceAndLod() {
     int mode = std::clamp(g_cfg.drawDistMode, 0, 3);
     // 0x4447D6: mov eax, imm32 (added to 0x177000 for total terrain + vehicle render box half-extent)
@@ -979,7 +1182,6 @@ static void ApplyDrawDistanceAndLod() {
 
 static int32_t ComputeHorPlusFocalX() {
     if (!GlideIsHorPlusView()) {
-        Sync3dzHorizontalCull(512);
         return 512;
     }
     int32_t clipW = mem<int32_t>(addr::g_ClipRight) - mem<int32_t>(addr::g_ClipLeft) + 1;
@@ -990,12 +1192,55 @@ static int32_t ComputeHorPlusFocalX() {
     double winAspect = static_cast<double>(winW) / static_cast<double>(winH);
     constexpr double kBaseAspect = 4.0 / 3.0;
     if (winAspect <= kBaseAspect + 0.01) {
-        Sync3dzHorizontalCull(512);
         return 512;
     }
-    int32_t fx = std::clamp(static_cast<int32_t>(std::lround(512.0 * (kBaseAspect / winAspect))), 180, 512);
-    Sync3dzHorizontalCull(fx);
-    return fx;
+    return std::clamp(static_cast<int32_t>(std::lround(512.0 * (kBaseAspect / winAspect))), 180, 512);
+}
+
+// Replaces 0x44DF1D..0x44DF96 (the bounding-sphere frustum cull tail of 0x44DEC0).
+// Stock 1998 code did `shl eax, 9` in 32-bit signed math on unshifted 1.15 fixed-point camX/camY,
+// overflowing whenever |camX| >= 0x400000 (happening frequently near the left/right edges of 21:9
+// Hor+ views and causing 3D tank models to flicker in and out). Also uses true sphere-plane
+// margin `radius * sqrt(1 + slope^2)` so wide models & gun barrels never pop early at screen edges.
+extern "C" int32_t __cdecl Impl_Cull3dzSphere() {
+    const uint8_t* ctx = mem<const uint8_t*>(addr::g_3dzCullCtxPtr);
+    if (!ctx) return 0;
+    const uint16_t* hdr = *reinterpret_cast<const uint16_t* const*>(ctx + 0x00);
+    if (!hdr) return 0;
+
+    int32_t shift  = static_cast<int32_t>(mem<uint8_t>(addr::g_3dzPosShift));
+    int32_t rShift = std::clamp(15 - shift, 0, 30);
+    int64_t radius = static_cast<int64_t>(hdr[0]) << rShift;
+
+    int64_t camX = static_cast<int64_t>(*reinterpret_cast<const int32_t*>(ctx + 0x18));
+    int64_t camY = static_cast<int64_t>(*reinterpret_cast<const int32_t*>(ctx + 0x1C));
+    int64_t camZ = static_cast<int64_t>(*reinterpret_cast<const int32_t*>(ctx + 0x20));
+
+    if (camZ + radius < 0) return 1;
+
+    int32_t focalX = ComputeHorPlusFocalX();
+    double slopeX = 320.0 / static_cast<double>(std::max(180, focalX)); // 0.625 in 4:3, ~1.12 in 21:9
+    double slopeY = 320.0 / 512.0;                                      // generous 320 vs 240 half-height
+
+    double radX = static_cast<double>(radius) * std::sqrt(1.0 + slopeX * slopeX) * 1.15;
+    double radY = static_cast<double>(radius) * std::sqrt(1.0 + slopeY * slopeY) * 1.15;
+
+    double zD = static_cast<double>(camZ);
+    if (std::fabs(static_cast<double>(camX)) > zD * slopeX + radX) return 1;
+    if (std::fabs(static_cast<double>(camY)) > zD * slopeY + radY) return 1;
+    return 0;
+}
+
+__attribute__((naked)) static void Thunk_Cull3dzTail() {
+    asm volatile(
+        "call _Impl_Cull3dzSphere\n\t"
+        "popl %%ebp\n\t"
+        "popl %%edi\n\t"
+        "popl %%esi\n\t"
+        "popl %%ebx\n\t"
+        "ret\n\t"
+        ::: "memory"
+    );
 }
 
 extern "C" void __cdecl Impl_ClassifyFrustumVertex(M1Vertex3D* v) {
@@ -1133,8 +1378,9 @@ void GlideGLInstallHooks() {
     InstallCall(addr::D3DInitCallSite,       reinterpret_cast<void*>(&Hook_D3DInitRedirect));
     InstallJump(addr::ClassifyFrustumVertex, reinterpret_cast<void*>(&Thunk_ClassifyFrustumVertex));
     InstallJump(addr::Project3DVertex,       reinterpret_cast<void*>(&Thunk_Project3DVertex));
+    InstallJump(addr::Patch3dzCullTail,      reinterpret_cast<void*>(&Thunk_Cull3dzTail));
     ApplyDrawDistanceAndLod();
-    LogPrintf("[GLIDE-GL] LoadGlide2x, True Hor+ 3D, 3DZ cull fix & Extended Draw Distance/LOD hooks installed\n");
+    LogPrintf("[GLIDE-GL] LoadGlide2x, True Hor+ 3D, 64-bit 3DZ cull fix & Extended Draw Distance/LOD hooks installed\n");
 }
 
 void GlideGLShutdown() {

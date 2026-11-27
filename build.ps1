@@ -22,6 +22,8 @@ if ([string]::IsNullOrWhiteSpace($ZigExe)) {
         $ZigExe = $env:ZIG_EXE
     } elseif (Get-Command zig -ErrorAction SilentlyContinue) {
         $ZigExe = (Get-Command zig).Source
+    } elseif (Test-Path (Join-Path $thirdPty "zig\zig-x86_64-windows-0.14.1\zig.exe")) {
+        $ZigExe = Join-Path $thirdPty "zig\zig-x86_64-windows-0.14.1\zig.exe"
     } elseif (Test-Path "C:\tools\zig\zig-x86_64-windows-0.14.1\zig.exe") {
         $ZigExe = "C:\tools\zig\zig-x86_64-windows-0.14.1\zig.exe"
     } else {
@@ -101,6 +103,7 @@ Write-Host "Building m1tp2_recomp.dll (32-bit x86, SDL3 + OpenGL 3.3 + Dear ImGu
     "$src\vfs_mod.cpp" `
     "$src\campaign_hud.cpp" `
     "$src\gunnery.cpp" `
+    "$src\audio_mixer.cpp" `
     "$src\gl_loader.cpp" `
     "$src\overlay_ui.cpp" `
     "$src\video_sdl.cpp" `

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.0",
+    [string]$Version = "0.3.0",
     [string]$ZigExe  = ""
 )
 
@@ -10,6 +10,7 @@ $src      = Join-Path $repoRoot "src"
 $build    = Join-Path $repoRoot "build"
 $dist     = Join-Path $repoRoot "dist"
 $tools    = Join-Path $repoRoot "tools"
+$thirdPty = Join-Path $repoRoot "third_party"
 
 # Locate Zig compiler
 if ([string]::IsNullOrWhiteSpace($ZigExe)) {
@@ -17,6 +18,8 @@ if ([string]::IsNullOrWhiteSpace($ZigExe)) {
         $ZigExe = $env:ZIG_EXE
     } elseif (Get-Command zig -ErrorAction SilentlyContinue) {
         $ZigExe = (Get-Command zig).Source
+    } elseif (Test-Path (Join-Path $thirdPty "zig\zig-x86_64-windows-0.14.1\zig.exe")) {
+        $ZigExe = Join-Path $thirdPty "zig\zig-x86_64-windows-0.14.1\zig.exe"
     } elseif (Test-Path "C:\tools\zig\zig-x86_64-windows-0.14.1\zig.exe") {
         $ZigExe = "C:\tools\zig\zig-x86_64-windows-0.14.1\zig.exe"
     } else {

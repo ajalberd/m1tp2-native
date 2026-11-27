@@ -4,6 +4,7 @@
 #include "vfs_mod.h"
 #include "campaign_hud.h"
 #include "gunnery.h"
+#include "audio_mixer.h"
 #include "gl_loader.h"
 #include "common.h"
 
@@ -34,6 +35,7 @@ bool g_open   = false;
 bool g_inited = false;
 
 bool g_showDisplay  = true;
+bool g_showAudio    = false;
 bool g_showGunnery  = false;
 bool g_showCampaign = false;
 bool g_showKeys     = false;
@@ -95,12 +97,13 @@ static void EnsureKeysTextureLoaded() {
 
     glGenTextures(1, &g_keysTex);
     glBindTexture(GL_TEXTURE_2D, g_keysTex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    gl::GenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, 0);
     stbi_image_free(pixels);
 
@@ -282,7 +285,7 @@ static void DrawStatsPill() {
 
 static void DrawDisplayWindow() {
     ImGui::SetNextWindowPos(ImVec2(24.0f, 44.0f), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(430.0f, 455.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 485.0f), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("3D / Display Settings", &g_showDisplay)) {
         ImGui::End();
         return;
@@ -299,6 +302,15 @@ static void DrawDisplayWindow() {
         VideoApplyDisplaySettings();
         changed = true;
     }
+    if (ImGui::Checkbox("100 FPS Mode (High-Precision Timer)", &g_cfg.unlock100Fps)) {
+        VideoApplyFrameRateCap();
+        changed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Replaces M1TP2's 1998 15.6ms GetTickCount + 50 FPS cap with a microsecond QPC timer\n"
+                          "and 100 FPS cap (72 FPS with 144Hz VSync, 100 FPS with VSync off / G-Sync).\n"
+                          "Simulation speed remains 100%% authentic 1x real-time.");
+    }
 
     const char* aspect3dNames[] = {
         "Smart Hor+ Widescreen (Recommended)",
@@ -311,8 +323,12 @@ static void DrawDisplayWindow() {
         changed = true;
     }
 
-    const char* mapNames[] = { "16:9 Full Fill", "4:3 Original", "16:10 Wide" };
-    if (ImGui::Combo("Tactical Map / Planner", &g_cfg.mapAspectMode, mapNames, 3)) {
+    const int mapVals[] = { MAP_ASPECT_AUTO_NATIVE, MAP_ASPECT_16_10, MAP_ASPECT_16_9, MAP_ASPECT_STRETCH };
+    const char* mapNames[] = { "Auto Aspect-Native (4:3)", "16:10 Wide (Capped)", "16:9 Wide (Capped)", "Stretch Fill" };
+    int mapIdx = 0;
+    for (int i = 0; i < 4; ++i) if (mapVals[i] == g_cfg.mapAspectMode) mapIdx = i;
+    if (ImGui::Combo("Tactical Map / Planner", &mapIdx, mapNames, 4)) {
+        g_cfg.mapAspectMode = mapVals[mapIdx];
         GlideApplySettings();
         changed = true;
     }
@@ -401,6 +417,54 @@ static void DrawDisplayWindow() {
     ImGui::End();
 }
 
+static void DrawAudioWindow() {
+    ImGui::SetNextWindowPos(ImVec2(470.0f, 44.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(390.0f, 255.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Audio Mixer", &g_showAudio)) {
+        ImGui::End();
+        return;
+    }
+
+    bool changed = false;
+    if (ImGui::Checkbox("Mute All Audio", &g_cfg.audioMute)) {
+        changed = true;
+    }
+    ImGui::Separator();
+
+    auto pctSlider = [&](const char* label, float& v) {
+        int pct = std::clamp(static_cast<int>(std::lround(v * 100.0f)), 0, 100);
+        if (ImGui::SliderInt(label, &pct, 0, 100, "%d%%")) {
+            v = static_cast<float>(pct) / 100.0f;
+            changed = true;
+        }
+    };
+
+    if (g_cfg.audioMute) ImGui::BeginDisabled();
+    pctSlider("Master Volume",     g_cfg.audioMasterVol);
+    pctSlider("Music (Menu/Map)",  g_cfg.audioMusicVol);
+    pctSlider("Weapons & SFX",     g_cfg.audioSfxVol);
+    pctSlider("Engines & Tracks",  g_cfg.audioEngineVol);
+    pctSlider("Crew Radio / Voice",g_cfg.audioVoiceVol);
+    if (g_cfg.audioMute) ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    if (ImGui::Button("Reset All to 100%")) {
+        g_cfg.audioMute      = false;
+        g_cfg.audioMasterVol = 1.0f;
+        g_cfg.audioMusicVol  = 1.0f;
+        g_cfg.audioSfxVol    = 1.0f;
+        g_cfg.audioEngineVol = 1.0f;
+        g_cfg.audioVoiceVol  = 1.0f;
+        changed = true;
+    }
+
+    if (changed) {
+        AudioApplySettings();
+        SaveConfig();
+    }
+    ImGui::End();
+}
+
 static void DrawGunneryWindow() {
     ImGui::SetNextWindowPos(ImVec2(470.0f, 44.0f), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(430.0f, 360.0f), ImGuiCond_FirstUseEver);
@@ -429,6 +493,15 @@ static void DrawGunneryWindow() {
         ImGui::TextWrapped("Replaces M1TP2's 640x480 quantization and integer /8 deadzone with sub-pixel smooth tracking for crisp long-range aiming in 10x zoom.");
     } else if (g_cfg.gunnerMouseMode == GUNNER_DIRECT_RAW) {
         ImGui::TextWrapped("Uses raw SDL mouse deltas for direct 1:1 aiming when left-clicked into GPS/GAS sight (right-click releases). Capped to authentic M1A2 turret slew speed.");
+    }
+
+    if (ImGui::Checkbox("Disable Joystick / Gamepad Input", &g_cfg.disableJoystick)) {
+        // Reset M1TP2's joystick probe state so re-enabling works immediately without restart
+        mem<int32_t>(addr::g_JoyInitState) = 0;
+        changed = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Prevents M1TP2 from polling plugged-in joysticks, HOTAS, pedals, or gamepads\nthat can cause unwanted turret or steering drift.");
     }
 
     ImGui::Separator();
@@ -503,30 +576,59 @@ static void DrawCampaignModsWindow() {
     ImGui::End();
 }
 
+static float g_keysZoom = 0.0f; // 0.0 = Fit to window, >0 = manual scale
+
 static void DrawQuickKeysWindow(int winW, int winH) {
     EnsureKeysTextureLoaded();
-    float initW = std::min(static_cast<float>(winW) - 80.0f, 1120.0f);
-    float initH = std::min(static_cast<float>(winH) - 80.0f, 680.0f);
-    ImGui::SetNextWindowPos(ImVec2((winW - initW) * 0.5f, (winH - initH) * 0.5f), ImGuiCond_FirstUseEver);
+    float maxH = std::max(420.0f, static_cast<float>(winH) - 80.0f);
+    float maxW = std::max(640.0f, static_cast<float>(winW) - 80.0f);
+    float aspect = (g_keysW > 0 && g_keysH > 0) ? (static_cast<float>(g_keysW) / static_cast<float>(g_keysH)) : (16.0f / 9.0f);
+    float initH = std::min(maxH, 1140.0f);
+    float initW = std::min(maxW, initH * aspect + 24.0f);
+    initH = std::min(maxH, (initW - 24.0f) / aspect + 68.0f);
+    ImGui::SetNextWindowPos(ImVec2((winW - initW) * 0.5f, std::max(30.0f, (winH - initH) * 0.5f)), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(initW, initH), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("M1TP2 Quickstart Keyboard Layout", &g_showKeys)) {
         ImGui::End();
         return;
     }
 
+    if (ImGui::Button("Fit")) g_keysZoom = 0.0f;
+    ImGui::SameLine();
+    if (ImGui::Button("100%")) g_keysZoom = 1.0f;
+    ImGui::SameLine();
+    if (ImGui::Button("125%")) g_keysZoom = 1.25f;
+    ImGui::SameLine();
+    if (ImGui::Button("Open Manual PDF")) OpenExternalFile("M1_Tank_Platoon_II_Manual.pdf", "Manual PDF");
+    ImGui::SameLine();
+    if (ImGui::Button("Open Keyboard Image Externally")) OpenExternalFile("docs\\M1TP2_Quickstart_Keys.png", "Quickstart PNG");
+    ImGui::Separator();
+
     if (g_keysTex && g_keysW > 0 && g_keysH > 0) {
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        float imgH = std::max(120.0f, avail.y - 34.0f);
-        float aspect = static_cast<float>(g_keysW) / static_cast<float>(g_keysH);
-        float drawW = avail.x;
-        float drawH = drawW / aspect;
-        if (drawH > imgH) {
-            drawH = imgH;
-            drawW = drawH * aspect;
+        float imgAreaW = std::max(200.0f, avail.x);
+        float imgAreaH = std::max(140.0f, avail.y);
+        ImGuiWindowFlags cf = (g_keysZoom > 0.0f) ? ImGuiWindowFlags_HorizontalScrollbar : 0;
+        ImGui::BeginChild("##OverlayKeysScroll", ImVec2(imgAreaW, imgAreaH), ImGuiChildFlags_None, cf);
+        ImVec2 inner = ImGui::GetContentRegionAvail();
+        float drawW, drawH;
+        if (g_keysZoom <= 0.0f) {
+            drawW = inner.x;
+            drawH = drawW / aspect;
+            if (drawH > inner.y) {
+                drawH = inner.y;
+                drawW = drawH * aspect;
+            }
+        } else {
+            drawW = static_cast<float>(g_keysW) * g_keysZoom;
+            drawH = static_cast<float>(g_keysH) * g_keysZoom;
         }
-        float padX = std::max(0.0f, (avail.x - drawW) * 0.5f);
+        float padX = std::max(0.0f, (inner.x - drawW) * 0.5f);
+        float padY = std::max(0.0f, (inner.y - drawH) * 0.5f);
         if (padX > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padX);
+        if (padY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + padY);
         ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(g_keysTex)), ImVec2(drawW, drawH));
+        ImGui::EndChild();
     } else {
         ImGui::TextColored(ImVec4(0.98f, 0.78f, 0.34f, 1.0f), "Quickstart Controls Summary (docs\\M1TP2_Quickstart_Keys.png not found)");
         ImGui::Separator();
@@ -537,9 +639,6 @@ static void DrawQuickKeysWindow(int winW, int winH) {
         ImGui::Text("PLATOON: F=Fire at Will | H=Hold Fire | Shift+W/L/C/V=Wedge/Line/Col/Vee | Bksp=Smoke Gren | /=Smoke Gen");
     }
 
-    if (ImGui::Button("Open Manual PDF")) OpenExternalFile("M1_Tank_Platoon_II_Manual.pdf", "Manual PDF");
-    ImGui::SameLine();
-    if (ImGui::Button("Open Keyboard Image Externally")) OpenExternalFile("docs\\M1TP2_Quickstart_Keys.png", "Quickstart PNG");
     ImGui::End();
 }
 
@@ -603,10 +702,13 @@ bool OverlayIsOpen() { return g_open; }
 
 void OverlayToggle() {
     g_open = !g_open;
-    if (g_open) {
-        SDL_ShowCursor();
-    } else {
-        SDL_HideCursor();
+    if (g_inited) {
+        // Draw ImGui's own software cursor while the overlay is open so M1TP2's Win32
+        // ShowCursor(FALSE) counter can never hide the cursor in fullscreen OpenGL.
+        ImGui::GetIO().MouseDrawCursor = g_open;
+    }
+    SDL_HideCursor();
+    if (!g_open) {
         SaveConfig();
     }
 }
@@ -661,6 +763,7 @@ void OverlayRender(int winW, int winH) {
     gl::BindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, winW, winH);
 
+    ImGui::GetIO().MouseDrawCursor = g_open;
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
@@ -711,6 +814,7 @@ void OverlayRender(int winW, int winH) {
             }
 
             ImGui::MenuItem("3D / Display",    nullptr, &g_showDisplay);
+            ImGui::MenuItem("Audio Mixer",     nullptr, &g_showAudio);
             ImGui::MenuItem("Gunnery & FCS",   nullptr, &g_showGunnery);
             ImGui::MenuItem("Campaign & Mods", nullptr, &g_showCampaign);
             ImGui::MenuItem("Quick Keys",      nullptr, &g_showKeys);
@@ -726,6 +830,7 @@ void OverlayRender(int winW, int winH) {
         }
 
         if (g_showDisplay)  DrawDisplayWindow();
+        if (g_showAudio)    DrawAudioWindow();
         if (g_showGunnery)  DrawGunneryWindow();
         if (g_showCampaign) DrawCampaignModsWindow();
         if (g_showKeys)     DrawQuickKeysWindow(winW, winH);

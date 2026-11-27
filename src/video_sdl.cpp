@@ -476,7 +476,7 @@ int __cdecl Hook_MsgPump() {
         }
     }
 
-    if (!processed) {
+    if (!processed && mem<uint32_t>(addr::g_RenderMode) == 0) {
         SDL_Delay(1);
     }
     return processed;
@@ -619,7 +619,98 @@ void __cdecl Hook_IntroSmacker(const char* path, int x, int y, int flags) {
     reinterpret_cast<PlaySmkFn>(addr::PlaySmacker)(path, x, y, flags);
 }
 
+using JoyGetPosExFn    = uint32_t(__stdcall*)(uint32_t uJoyID, void* pji);
+using JoyGetDevCapsAFn = uint32_t(__stdcall*)(uintptr_t uJoyID, void* pjc, uint32_t cbjc);
+
+JoyGetPosExFn    g_origJoyGetPosEx    = nullptr;
+JoyGetDevCapsAFn g_origJoyGetDevCapsA = nullptr;
+
+constexpr uint32_t kJoyErrUnplugged = 167u; // JOYERR_UNPLUGGED (0xA7)
+
+uint32_t __stdcall Hook_joyGetPosEx(uint32_t uJoyID, void* pji) {
+    if (g_cfg.disableJoystick) return kJoyErrUnplugged;
+    return g_origJoyGetPosEx ? g_origJoyGetPosEx(uJoyID, pji) : kJoyErrUnplugged;
+}
+
+uint32_t __stdcall Hook_joyGetDevCapsA(uintptr_t uJoyID, void* pjc, uint32_t cbjc) {
+    if (g_cfg.disableJoystick) return kJoyErrUnplugged;
+    return g_origJoyGetDevCapsA ? g_origJoyGetDevCapsA(uJoyID, pjc, cbjc) : kJoyErrUnplugged;
+}
+
+static void InstallJoystickHooks() {
+    g_origJoyGetPosEx    = reinterpret_cast<JoyGetPosExFn>(mem<uintptr_t>(addr::IatJoyGetPosEx));
+    g_origJoyGetDevCapsA = reinterpret_cast<JoyGetDevCapsAFn>(mem<uintptr_t>(addr::IatJoyGetDevCapsA));
+    uintptr_t pPos  = reinterpret_cast<uintptr_t>(&Hook_joyGetPosEx);
+    uintptr_t pCaps = reinterpret_cast<uintptr_t>(&Hook_joyGetDevCapsA);
+    WriteBytes(addr::IatJoyGetPosEx,    &pPos,  sizeof(pPos));
+    WriteBytes(addr::IatJoyGetDevCapsA, &pCaps, sizeof(pCaps));
+    LogPrintf("[INPUT] WinMM joystick IAT hooks installed (disableJoystick=%d)\n", g_cfg.disableJoystick ? 1 : 0);
+}
+
+// High-precision 10 ms tick counter replacing M1TP2's GetTickCount() / 10 (0x438CB0).
+// Eliminates Windows' 15.625 ms GetTickCount quantum jitter and yields cleanly during
+// the main loop's frame-wait spin at 0x41E372 while keeping simulation speed 100% 1x real-time.
+bool          g_qpcInited     = false;
+uint64_t      g_qpcFreq       = 10000000ULL;
+LARGE_INTEGER g_qpcBase       = {};
+uint32_t      g_tickBase      = 0;
+uint32_t      g_lastTickRet   = 0;
+int           g_sameTickSpins = 0;
+
+uint32_t __cdecl Hook_GetTicks10ms() {
+    if (!g_qpcInited) {
+        LARGE_INTEGER freq{};
+        QueryPerformanceFrequency(&freq);
+        if (freq.QuadPart > 0) g_qpcFreq = static_cast<uint64_t>(freq.QuadPart);
+        QueryPerformanceCounter(&g_qpcBase);
+        g_tickBase = GetTickCount() / 10u;
+        g_qpcInited = true;
+    }
+
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    uint64_t deltaCounts = (now.QuadPart >= g_qpcBase.QuadPart)
+        ? static_cast<uint64_t>(now.QuadPart - g_qpcBase.QuadPart)
+        : 0ULL;
+    uint64_t secs = deltaCounts / g_qpcFreq;
+    uint64_t rem  = deltaCounts % g_qpcFreq;
+    uint64_t ticks64 = secs * 100ULL + (rem * 100ULL) / g_qpcFreq;
+    uint32_t ret = g_tickBase + static_cast<uint32_t>(ticks64);
+
+    if (ret == g_lastTickRet) {
+        if (++g_sameTickSpins >= 4) {
+            uint64_t remUs      = (rem * 1000000ULL) / g_qpcFreq;
+            uint64_t usIntoTick = remUs % 10000ULL;
+            uint64_t usLeft     = 10000ULL - usIntoTick;
+            if (g_window && usLeft > 1500ULL) {
+                SDL_DelayNS(1000000ULL);
+            } else {
+                SwitchToThread();
+            }
+        }
+    } else {
+        g_lastTickRet = ret;
+        g_sameTickSpins = 0;
+    }
+    return ret;
+}
+
 } // namespace
+
+void VideoApplyFrameRateCap() {
+    const uint8_t* ins = reinterpret_cast<const uint8_t*>(static_cast<uintptr_t>(addr::PatchFrameCapImm - 2));
+    if (ins[0] == 0x83 && ins[1] == 0xF8 && ins[3] == 0x7E) {
+        // 0x00 => `cmp eax, 0; jle` (>= 10ms = 100 FPS max; 72 FPS with 144Hz VSync)
+        // 0x01 => `cmp eax, 1; jle` (>= 20ms = stock 50 FPS max)
+        uint8_t imm = g_cfg.unlock100Fps ? 0x00u : 0x01u;
+        WriteBytes(addr::PatchFrameCapImm, &imm, 1);
+        LogPrintf("[VIDEO] Frame rate cap: %s (0x41E386=0x%02X, QPC 10ms timer active)\n",
+                  g_cfg.unlock100Fps ? "100 FPS (Hi-Res)" : "50 FPS (Stock Cap)", imm);
+    } else {
+        LogPrintf("[VIDEO] Frame cap signature mismatch at 0x41E384 (%02X %02X %02X %02X), skipping patch\n",
+                  ins[0], ins[1], ins[2], ins[3]);
+    }
+}
 
 SDL_Window* VideoGetWindow() { return g_window; }
 
@@ -646,24 +737,27 @@ void VideoApplyDisplaySettings() {
               g_winW, g_winH, g_cfg.fullscreen, g_cfg.vsync, g_cfg.menuAspectMode, g_cfg.aspectMode);
 }
 
-void VideoGet43Viewport(int& vx, int& vy, int& vw, int& vh) {
+static void VideoGetAspectViewport(float targetAspect, int& vx, int& vy, int& vw, int& vh) {
     if (g_winW <= 0 || g_winH <= 0) {
         vx = vy = 0; vw = 640; vh = 480;
         return;
     }
-    constexpr float kTargetAspect = 4.0f / 3.0f;
     float winAspect = float(g_winW) / float(g_winH);
-    if (winAspect > kTargetAspect) {
+    if (winAspect > targetAspect) {
         vh = g_winH;
-        vw = int(g_winH * kTargetAspect + 0.5f);
+        vw = int(g_winH * targetAspect + 0.5f);
         vx = (g_winW - vw) / 2;
         vy = 0;
     } else {
         vw = g_winW;
-        vh = int(g_winW / kTargetAspect + 0.5f);
+        vh = int(g_winW / targetAspect + 0.5f);
         vx = 0;
         vy = (g_winH - vh) / 2;
     }
+}
+
+void VideoGet43Viewport(int& vx, int& vy, int& vw, int& vh) {
+    VideoGetAspectViewport(4.0f / 3.0f, vx, vy, vw, vh);
 }
 
 void VideoGetViewport(bool is3D, int& vx, int& vy, int& vw, int& vh) {
@@ -673,21 +767,21 @@ void VideoGetViewport(bool is3D, int& vx, int& vy, int& vw, int& vh) {
     }
 
     if (is3D) {
-        // Dedicated Tactical Map / Battleplanner aspect when in UberMapScreen (view == 2)
+        // Dedicated Tactical Map / Battleplanner aspect when in UberMapScreen (view == 2):
+        // The planner map is natively a 640x480 (4:3) UI with a 400x400 1:1 square map pane.
+        // Auto-native (default) automatically preserves crisp 4:3 with zero stretch on 16:9 / 21:9 / 32:9.
         if (mem<int32_t>(addr::g_CurrentView) == 2) {
             int mapMode = g_cfg.mapAspectMode;
-            if (mapMode == ASPECT_FILL) {
+            if (mapMode == MAP_ASPECT_STRETCH) {
                 vx = 0; vy = 0; vw = g_winW; vh = g_winH;
                 return;
             }
-            if (mapMode == ASPECT_16_10) {
-                float targetAspect = 16.0f / 10.0f;
-                float winAspect = float(g_winW) / float(g_winH);
-                if (winAspect > targetAspect) {
-                    vh = g_winH; vw = int(g_winH * targetAspect + 0.5f); vx = (g_winW - vw) / 2; vy = 0;
-                } else {
-                    vw = g_winW; vh = int(g_winW / targetAspect + 0.5f); vx = 0; vy = (g_winH - vh) / 2;
-                }
+            if (mapMode == MAP_ASPECT_16_9) {
+                VideoGetAspectViewport(16.0f / 9.0f, vx, vy, vw, vh);
+                return;
+            }
+            if (mapMode == MAP_ASPECT_16_10) {
+                VideoGetAspectViewport(16.0f / 10.0f, vx, vy, vw, vh);
                 return;
             }
             VideoGet43Viewport(vx, vy, vw, vh);
@@ -837,7 +931,10 @@ void VideoSDLInstallHooks() {
     InstallCall(addr::IntroCallMps,       reinterpret_cast<void*>(&Hook_IntroSmacker));
     InstallCall(addr::IntroCallMain,      reinterpret_cast<void*>(&Hook_IntroSmacker));
     InstallCall(addr::IntroCallCredits,   reinterpret_cast<void*>(&Hook_IntroSmacker));
-    LogPrintf("[VIDEO] SDL3/OpenGL 2D + Window + Input + Smacker + SkipIntro hooks installed\n");
+    InstallJump(addr::GetTicks10ms,       reinterpret_cast<void*>(&Hook_GetTicks10ms));
+    VideoApplyFrameRateCap();
+    InstallJoystickHooks();
+    LogPrintf("[VIDEO] SDL3/OpenGL 2D + Window + Input + Smacker + SkipIntro + Hi-Res Timer hooks installed\n");
 }
 
 void VideoSDLShutdown() {

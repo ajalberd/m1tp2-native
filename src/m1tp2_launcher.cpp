@@ -20,6 +20,8 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,9 +34,10 @@ struct LauncherCfg {
     int   windowHeight          = 0;
     bool  fullscreen            = true;
     bool  vsync                 = true;
+    bool  unlock100Fps          = true;
     int   menuAspectMode        = 1;    // 4:3
     int   aspectMode            = 0;    // Smart Hor+
-    int   mapAspectMode         = 1;    // 4:3
+    int   mapAspectMode         = 0;    // Auto Aspect-Native (4:3)
     int   msaaSamples           = 4;
     int   anisotropy            = 16;
     int   texFilter3D           = 0;
@@ -52,8 +55,62 @@ struct LauncherCfg {
     int   gunnerMouseMode       = 0;    // Precision Stick
     float gunnerMouseSens       = 1.0f;
     int   ballisticLeadMode     = 0;    // Smooth FCS
+    bool  disableJoystick       = true;
+    bool  audioMute             = false;
+    float audioMasterVol        = 1.0f;
+    float audioMusicVol         = 1.0f;
+    float audioSfxVol           = 1.0f;
+    float audioEngineVol        = 1.0f;
+    float audioVoiceVol         = 1.0f;
     bool  showStatsHud          = false;
 };
+
+struct StockGameCfg {
+    bool    loaded      = false;
+    bool    dirty       = false;
+    int32_t soundOn     = 1;
+    int32_t detailHigh  = 1;
+    int32_t renderMode  = 1; // 0=SW, 1=Glide, 2=D3D
+    int32_t alphaBlend  = 1;
+    int32_t extraFlag   = 1;
+    char    hostName[9]   = "HOST";
+    char    playerName[9] = "PLAYER";
+};
+
+static bool LoadStockGameCfg(const std::string& path, StockGameCfg& g) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    uint8_t buf[38] = {};
+    size_t rd = std::fread(buf, 1, sizeof(buf), f);
+    std::fclose(f);
+    if (rd < 20) return false;
+    int32_t ints[5] = {};
+    std::memcpy(ints, buf, sizeof(ints));
+    g.soundOn    = ints[0] ? 1 : 0;
+    g.detailHigh = ints[1] ? 1 : 0;
+    g.renderMode = std::clamp(ints[2], 0, 2);
+    g.alphaBlend = ints[3] ? 1 : 0;
+    g.extraFlag  = ints[4] ? 1 : 0;
+    if (rd >= 38) {
+        std::memcpy(g.hostName,   buf + 20, 8); g.hostName[8]   = '\0';
+        std::memcpy(g.playerName, buf + 29, 8); g.playerName[8] = '\0';
+    }
+    g.loaded = true;
+    return true;
+}
+
+static void SaveStockGameCfg(const std::string& path, const StockGameCfg& g) {
+    if (!g.loaded || !g.dirty) return;
+    uint8_t buf[38] = {};
+    int32_t ints[5] = { g.soundOn, g.detailHigh, g.renderMode, g.alphaBlend, g.extraFlag };
+    std::memcpy(buf, ints, sizeof(ints));
+    std::strncpy(reinterpret_cast<char*>(buf + 20), g.hostName, 8);
+    std::strncpy(reinterpret_cast<char*>(buf + 29), g.playerName, 8);
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return;
+    std::fwrite(buf, 1, sizeof(buf), f);
+    std::fclose(f);
+}
 
 static bool FileExists(const std::string& p) {
     DWORD a = GetFileAttributesA(p.c_str());
@@ -72,9 +129,13 @@ static void LoadIni(const std::string& path, LauncherCfg& c) {
             if (_stricmp(k, "WindowHeight") == 0)          c.windowHeight          = std::atoi(v);
             if (_stricmp(k, "Fullscreen") == 0)            c.fullscreen            = (std::atoi(v) != 0);
             if (_stricmp(k, "VSync") == 0)                 c.vsync                 = (std::atoi(v) != 0);
+            if (_stricmp(k, "Unlock100Fps") == 0)          c.unlock100Fps          = (std::atoi(v) != 0);
             if (_stricmp(k, "MenuAspectMode") == 0)        c.menuAspectMode        = std::atoi(v);
             if (_stricmp(k, "AspectMode") == 0)            c.aspectMode            = std::atoi(v);
-            if (_stricmp(k, "MapAspectMode") == 0)         c.mapAspectMode         = std::atoi(v);
+            if (_stricmp(k, "MapAspectMode") == 0) {
+                int mv = std::atoi(v);
+                c.mapAspectMode = (mv == 1) ? 0 : mv;
+            }
             if (_stricmp(k, "MSAA") == 0)                  c.msaaSamples           = std::atoi(v);
             if (_stricmp(k, "Anisotropy") == 0)            c.anisotropy            = std::atoi(v);
             if (_stricmp(k, "TexFilter3D") == 0)           c.texFilter3D           = std::atoi(v);
@@ -92,6 +153,13 @@ static void LoadIni(const std::string& path, LauncherCfg& c) {
             if (_stricmp(k, "GunnerMouseMode") == 0)       c.gunnerMouseMode       = std::atoi(v);
             if (_stricmp(k, "GunnerMouseSens") == 0)       c.gunnerMouseSens       = static_cast<float>(std::atof(v));
             if (_stricmp(k, "BallisticLeadMode") == 0)     c.ballisticLeadMode     = std::atoi(v);
+            if (_stricmp(k, "DisableJoystick") == 0)       c.disableJoystick       = (std::atoi(v) != 0);
+            if (_stricmp(k, "AudioMute") == 0)             c.audioMute             = (std::atoi(v) != 0);
+            if (_stricmp(k, "AudioMasterVol") == 0)        c.audioMasterVol        = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
+            if (_stricmp(k, "AudioMusicVol") == 0)         c.audioMusicVol         = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
+            if (_stricmp(k, "AudioSfxVol") == 0)           c.audioSfxVol           = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
+            if (_stricmp(k, "AudioEngineVol") == 0)        c.audioEngineVol        = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
+            if (_stricmp(k, "AudioVoiceVol") == 0)         c.audioVoiceVol         = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
             if (_stricmp(k, "ShowStatsHud") == 0)          c.showStatsHud          = (std::atoi(v) != 0);
         }
     }
@@ -106,11 +174,12 @@ static void SaveIni(const std::string& path, const LauncherCfg& c) {
     std::fprintf(f, "WindowHeight = %d\n", c.windowHeight);
     std::fprintf(f, "Fullscreen = %d\n", c.fullscreen ? 1 : 0);
     std::fprintf(f, "VSync = %d\n", c.vsync ? 1 : 0);
+    std::fprintf(f, "Unlock100Fps = %d\n", c.unlock100Fps ? 1 : 0);
     std::fprintf(f, "# MenuAspectMode: 0=FillScreen, 1=4:3 (Default), 2=16:10, 3=CropZoom\n");
     std::fprintf(f, "MenuAspectMode = %d\n", c.menuAspectMode);
     std::fprintf(f, "# AspectMode (3D Combat): 0=SmartHor+ (Default), 1=All3DHor+, 2=4:3, 3=Stretch\n");
     std::fprintf(f, "AspectMode = %d\n", c.aspectMode);
-    std::fprintf(f, "# MapAspectMode (Battleplanner / IVIS Map): 0=FillScreen, 1=4:3 (Default), 2=16:10\n");
+    std::fprintf(f, "# MapAspectMode (Battleplanner / IVIS Map): 0=AutoNative4:3 (Default), 2=16:10, 3=16:9, 4=Stretch\n");
     std::fprintf(f, "MapAspectMode = %d\n", c.mapAspectMode);
     std::fprintf(f, "# MSAA: 0, 2, 4, 8\n");
     std::fprintf(f, "MSAA = %d\n", c.msaaSamples);
@@ -136,6 +205,13 @@ static void SaveIni(const std::string& path, const LauncherCfg& c) {
     std::fprintf(f, "GunnerMouseSens = %.2f\n", c.gunnerMouseSens);
     std::fprintf(f, "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n");
     std::fprintf(f, "BallisticLeadMode = %d\n", c.ballisticLeadMode);
+    std::fprintf(f, "DisableJoystick = %d\n", c.disableJoystick ? 1 : 0);
+    std::fprintf(f, "AudioMute = %d\n", c.audioMute ? 1 : 0);
+    std::fprintf(f, "AudioMasterVol = %.2f\n", c.audioMasterVol);
+    std::fprintf(f, "AudioMusicVol = %.2f\n", c.audioMusicVol);
+    std::fprintf(f, "AudioSfxVol = %.2f\n", c.audioSfxVol);
+    std::fprintf(f, "AudioEngineVol = %.2f\n", c.audioEngineVol);
+    std::fprintf(f, "AudioVoiceVol = %.2f\n", c.audioVoiceVol);
     std::fprintf(f, "ShowStatsHud = %d\n", c.showStatsHud ? 1 : 0);
     std::fclose(f);
 }
@@ -234,12 +310,19 @@ static GLuint LoadPngTexture(const std::string& path, int& outW, int& outH) {
     GLuint tex = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    using GenMipFn = void (APIENTRY *)(GLenum);
+    auto genMip = reinterpret_cast<GenMipFn>(SDL_GL_GetProcAddress("glGenerateMipmap"));
+    if (genMip) {
+        genMip(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    } else {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glBindTexture(GL_TEXTURE_2D, 0);
     stbi_image_free(px);
     outW = w;
@@ -300,6 +383,10 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
     LauncherCfg cfg;
     LoadIni(iniPath, cfg);
 
+    std::string stockCfgPath = dir + "\\game.cfg";
+    StockGameCfg stockCfg;
+    LoadStockGameCfg(stockCfgPath, stockCfg);
+
     bool hasGame       = FileExists(dir + "\\M1TP2.exe");
     bool hasWarCollege = FileExists(dir + "\\Dsg\\OMOPLAY.EXE");
     bool hasManualPdf  = FileExists(dir + "\\M1_Tank_Platoon_II_Manual.pdf");
@@ -327,7 +414,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
 
     SDL_Window* win = SDL_CreateWindow(
         "M1 Tank Platoon II — Native Launcher",
-        1080, 790,
+        1120, 860,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!win) {
         SDL_Quit();
@@ -342,16 +429,35 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
+
+    // Load crisp TrueType font baked at high res (28px) so maximizing on 1440p/21:9/4K stays razor-sharp
+    float baseFontScale = 1.0f;
+    const char* fontCandidates[] = {
+        "C:\\Windows\\Fonts\\segoeui.ttf",
+        "C:\\Windows\\Fonts\\arial.ttf",
+        "C:\\Windows\\Fonts\\tahoma.ttf"
+    };
+    for (const char* fp : fontCandidates) {
+        if (FileExists(fp)) {
+            if (io.Fonts->AddFontFromFileTTF(fp, 28.0f)) {
+                baseFontScale = 15.5f / 28.0f;
+                break;
+            }
+        }
+    }
+
     ApplyLauncherTheme();
+    const ImGuiStyle baseStyle = ImGui::GetStyle();
     ImGui_ImplSDL3_InitForOpenGL(win, glCtx);
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     int keysW = 0, keysH = 0;
     GLuint keysTex = hasKeysPng ? LoadPngTexture(keysPngPath, keysW, keysH) : 0;
 
-    int  selCard       = 0; // 0 = M1TP2, 1 = War College
-    bool showKeysModal = false;
-    int  launchChoice  = -1; // -1=none, 0=M1TP2, 1=WarCollege, 2=Quit
+    int   selCard       = 0; // 0 = M1TP2, 1 = War College
+    bool  showKeysModal = false;
+    float keysZoom      = 0.0f; // 0.0 = Fit to Window, >0 = manual scale factor (1.0 = native 1920x1080)
+    int   launchChoice  = -1; // -1=none, 0=M1TP2, 1=WarCollege, 2=Quit
     std::string statusNote;
 
     bool running = true;
@@ -393,24 +499,38 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+
+        // Dynamically scale the entire launcher proportionally with window size
+        const float dispW = std::max(320.0f, io.DisplaySize.x);
+        const float dispH = std::max(240.0f, io.DisplaySize.y);
+        const float s = std::clamp(std::min(dispW / 1120.0f, dispH / 860.0f), 0.78f, 2.50f);
+        auto S = [s](float v) { return v * s; };
+
+        ImGuiStyle& curStyle = ImGui::GetStyle();
+        curStyle = baseStyle;
+        curStyle.ScaleAllSizes(s);
+        io.FontGlobalScale = baseFontScale * s;
+
         ImGui::NewFrame();
 
         ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
-        ImGui::SetNextWindowSize(ImVec2(static_cast<float>(winW), static_cast<float>(winH)));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 18.0f));
+        ImGui::SetNextWindowSize(ImVec2(dispW, dispH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(S(24.0f), S(18.0f)));
         ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
         if (ImGui::Begin("##M1TP2NativeLauncher", nullptr, flags)) {
-            const float availW   = ImGui::GetContentRegionAvail().x;
-            const float contentW = std::min(availW, 1020.0f);
-            const float leftPad  = std::max(0.0f, (availW - contentW) * 0.5f);
+            const float availW        = ImGui::GetContentRegionAvail().x;
+            // Full-width layout for Quickstart Keyboard viewer; proportionally scaled 1020*s layout for main launcher
+            const float contentW      = showKeysModal ? availW : std::min(availW, S(1060.0f));
+            const float leftPad       = std::max(0.0f, (availW - contentW) * 0.5f);
             if (leftPad > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + leftPad);
+            const float contentRightX = ImGui::GetCursorPosX() + contentW;
 
             ImGui::BeginGroup();
 
             // Header Banner
-            ImGui::SetWindowFontScale(1.55f);
+            ImGui::SetWindowFontScale(1.50f);
             ImGui::TextColored(ImVec4(0.30f, 0.95f, 0.50f, 1.0f), "M1 TANK PLATOON II");
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.90f, 0.94f, 0.98f, 1.0f), "NATIVE LAUNCHER");
@@ -423,29 +543,59 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
 
             // Show Quickstart Keyboard Layout Full Viewer OR Main Launcher Body
             if (showKeysModal) {
+                ImGui::AlignTextToFramePadding();
                 ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.55f, 1.0f), "QUICKSTART KEYBOARD & GUNNERY LAYOUT");
-                ImGui::SameLine(contentW - 315.0f);
-                if (hasKeysPng && ImGui::Button("Open PNG Externally", ImVec2(170.0f, 28.0f))) {
-                    ShellExecuteA(nullptr, "open", keysPngPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                }
+
+                ImGui::SameLine(0.0f, S(18.0f));
+                if (ImGui::Button("Fit",  ImVec2(S(52.0f), S(28.0f)))) keysZoom = 0.0f;
+                ImGui::SameLine(0.0f, S(6.0f));
+                if (ImGui::Button("100%", ImVec2(S(58.0f), S(28.0f)))) keysZoom = 1.0f;
+                ImGui::SameLine(0.0f, S(6.0f));
+                if (ImGui::Button("125%", ImVec2(S(58.0f), S(28.0f)))) keysZoom = 1.25f;
+                ImGui::SameLine(0.0f, S(6.0f));
+                if (ImGui::Button("150%", ImVec2(S(58.0f), S(28.0f)))) keysZoom = 1.5f;
+
+                float btnPngW  = S(175.0f);
+                float btnBackW = S(155.0f);
+                float rightBtnsW = hasKeysPng ? (btnPngW + btnBackW + S(10.0f)) : btnBackW;
+                float targetX = std::max(ImGui::GetCursorPosX() + S(12.0f), contentRightX - rightBtnsW);
                 ImGui::SameLine();
-                if (ImGui::Button("Back to Launcher (Esc)", ImVec2(135.0f, 28.0f))) {
+                ImGui::SetCursorPosX(targetX);
+                if (hasKeysPng && ImGui::Button("Open PNG Externally", ImVec2(btnPngW, S(28.0f)))) {
+                    ShellExecuteA(nullptr, "open", keysPngPath.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+                }
+                if (hasKeysPng) ImGui::SameLine(0.0f, S(10.0f));
+                if (ImGui::Button("Back to Launcher (Esc)", ImVec2(btnBackW, S(28.0f)))) {
                     showKeysModal = false;
                 }
                 ImGui::Spacing();
 
-                float viewerH = std::max(320.0f, static_cast<float>(winH) - 180.0f);
+                ImVec2 viewAvail = ImGui::GetContentRegionAvail();
+                float viewerW = std::max(S(320.0f), viewAvail.x);
+                float viewerH = std::max(S(220.0f), viewAvail.y);
                 if (keysTex && keysW > 0 && keysH > 0) {
+                    ImGuiWindowFlags childFlags = (keysZoom > 0.0f) ? ImGuiWindowFlags_HorizontalScrollbar : 0;
+                    ImGui::BeginChild("##KeysImageScroll", ImVec2(viewerW, viewerH), ImGuiChildFlags_None, childFlags);
+                    ImVec2 inner = ImGui::GetContentRegionAvail();
                     float aspect = static_cast<float>(keysW) / static_cast<float>(keysH);
-                    float drawW = contentW;
-                    float drawH = drawW / aspect;
-                    if (drawH > viewerH) {
-                        drawH = viewerH;
-                        drawW = drawH * aspect;
+                    float drawW, drawH;
+                    if (keysZoom <= 0.0f) {
+                        drawW = inner.x;
+                        drawH = drawW / aspect;
+                        if (drawH > inner.y) {
+                            drawH = inner.y;
+                            drawW = drawH * aspect;
+                        }
+                    } else {
+                        drawW = static_cast<float>(keysW) * keysZoom;
+                        drawH = static_cast<float>(keysH) * keysZoom;
                     }
-                    float pad = std::max(0.0f, (contentW - drawW) * 0.5f);
-                    if (pad > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+                    float padX = std::max(0.0f, (inner.x - drawW) * 0.5f);
+                    float padY = std::max(0.0f, (inner.y - drawH) * 0.5f);
+                    if (padX > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padX);
+                    if (padY > 0.0f) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + padY);
                     ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(keysTex)), ImVec2(drawW, drawH));
+                    ImGui::EndChild();
                 } else {
                     ImGui::TextColored(ImVec4(0.98f, 0.76f, 0.30f, 1.0f),
                         "docs\\M1TP2_Quickstart_Keys.png not found. Essential Keys:");
@@ -474,7 +624,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                         "M1TP2_bin.exe  (Native SDL3 + OpenGL 3.3 Runtime)",
                         "Full Platoon Combat, Dynamic Campaigns & Battleplanner",
                         "- HD OpenGL 3.3 Glide (MSAA, 16x AF, up to 6km LOD)\n"
-                        "- Smart True Hor+ 16:9 Widescreen (4:3 Sights & Cockpits)\n"
+                        "- Smart True Hor+ Widescreen (4:3 Sights & Cockpits)\n"
                         "- Precision Gunner Mouse & Smooth FCS Broadside Lead Fix\n"
                         "- 1998 Campaign AI-Front Fix, Live Intel HUD & mods/ VFS",
                         hasGame,
@@ -494,9 +644,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                     }
                 };
 
-                const float cardGap = 16.0f;
+                const float cardGap = S(16.0f);
                 const float cardW   = (contentW - cardGap) * 0.5f;
-                const float cardH   = 205.0f;
+                const float cardH   = S(194.0f);
 
                 for (int i = 0; i < 2; ++i) {
                     if (i > 0) ImGui::SameLine(0.0f, cardGap);
@@ -507,33 +657,33 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                     ImVec4 border = isSel ? cd.accent : ImVec4(0.22f, 0.28f, 0.36f, 0.85f);
                     ImGui::PushStyleColor(ImGuiCol_ChildBg, bg);
                     ImGui::PushStyleColor(ImGuiCol_Border,  border);
-                    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, isSel ? 2.5f : 1.0f);
+                    ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, isSel ? S(2.5f) : S(1.0f));
 
                     char cid[32];
                     std::snprintf(cid, sizeof(cid), "##LaunchCard_%d", i);
                     ImGui::BeginChild(cid, ImVec2(cardW, cardH), ImGuiChildFlags_Borders);
 
-                    ImGui::SetCursorPos(ImVec2(14.0f, 12.0f));
+                    ImGui::SetCursorPos(ImVec2(S(14.0f), S(12.0f)));
                     ImGui::TextColored(cd.accent, "[%s]", cd.badge);
                     const char* stTxt = cd.ready ? "READY" : "NOT FOUND";
                     float stW = ImGui::CalcTextSize(stTxt).x;
-                    ImGui::SameLine(cardW - stW - 14.0f);
+                    ImGui::SameLine(cardW - stW - S(14.0f));
                     ImGui::TextColored(cd.ready ? ImVec4(0.30f, 0.95f, 0.48f, 1.0f) : ImVec4(0.90f, 0.35f, 0.32f, 1.0f),
                                        "%s", stTxt);
 
-                    ImGui::SetCursorPosX(14.0f);
-                    ImGui::SetWindowFontScale(1.26f);
+                    ImGui::SetCursorPosX(S(14.0f));
+                    ImGui::SetWindowFontScale(1.24f);
                     ImGui::TextColored(cd.ready ? ImVec4(0.96f, 0.98f, 1.0f, 1.0f) : ImVec4(0.55f, 0.58f, 0.62f, 1.0f),
                                        "%s", cd.title);
                     ImGui::SetWindowFontScale(1.0f);
 
-                    ImGui::SetCursorPosX(14.0f);
+                    ImGui::SetCursorPosX(S(14.0f));
                     ImGui::TextColored(ImVec4(0.90f, 0.80f, 0.42f, 1.0f), "%s", cd.sub);
                     ImGui::Spacing();
-                    ImGui::SetCursorPosX(14.0f);
+                    ImGui::SetCursorPosX(S(14.0f));
                     ImGui::TextColored(ImVec4(0.78f, 0.85f, 0.92f, 1.0f), "%s", cd.desc);
                     ImGui::Spacing();
-                    ImGui::SetCursorPosX(14.0f);
+                    ImGui::SetCursorPosX(S(14.0f));
                     ImGui::TextColored(ImVec4(0.62f, 0.70f, 0.80f, 1.0f), "%s", cd.bullets);
 
                     ImGui::SetCursorPos(ImVec2(0.0f, 0.0f));
@@ -554,47 +704,49 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                 ImGui::Spacing();
 
                 // Manuals & Quickstart Reference Panel
-                ImGui::BeginChild("##DocsPanel", ImVec2(contentW, 78.0f), ImGuiChildFlags_Borders);
-                ImGui::SetCursorPos(ImVec2(14.0f, 8.0f));
+                ImGui::BeginChild("##DocsPanel", ImVec2(contentW, S(74.0f)), ImGuiChildFlags_Borders);
+                ImGui::SetCursorPos(ImVec2(S(14.0f), S(7.0f)));
                 ImGui::TextColored(ImVec4(0.55f, 0.84f, 1.0f, 1.0f), "MANUALS & QUICKSTART REFERENCE");
 
-                ImGui::SetCursorPos(ImVec2(14.0f, 34.0f));
+                ImGui::SetCursorPos(ImVec2(S(14.0f), S(32.0f)));
+                const float btnH = S(30.0f);
+                const float docInnerW = contentW - S(28.0f) - S(40.0f); // 4 gaps of S(10)
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.14f, 0.36f, 0.28f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.50f, 0.38f, 1.0f));
-                if (ImGui::Button("Quickstart Keyboard Layout", ImVec2(225.0f, 32.0f))) {
+                if (ImGui::Button("Quickstart Keyboard Layout", ImVec2(docInnerW * 0.245f, btnH))) {
                     showKeysModal = true;
                 }
                 ImGui::PopStyleColor(2);
 
-                ImGui::SameLine();
+                ImGui::SameLine(0.0f, S(10.0f));
                 if (!hasManualPdf) ImGui::BeginDisabled();
-                if (ImGui::Button("Official Game Manual (PDF)", ImVec2(215.0f, 32.0f))) {
+                if (ImGui::Button("Official Game Manual (PDF)", ImVec2(docInnerW * 0.235f, btnH))) {
                     std::string p = dir + "\\M1_Tank_Platoon_II_Manual.pdf";
                     ShellExecuteA(nullptr, "open", p.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
                     statusNote = "Opened M1_Tank_Platoon_II_Manual.pdf";
                 }
                 if (!hasManualPdf) ImGui::EndDisabled();
 
-                ImGui::SameLine();
+                ImGui::SameLine(0.0f, S(10.0f));
                 if (!hasPatchTxt) ImGui::BeginDisabled();
-                if (ImGui::Button("v1.2 Patch Notes", ImVec2(150.0f, 32.0f))) {
+                if (ImGui::Button("v1.2 Patch Notes", ImVec2(docInnerW * 0.165f, btnH))) {
                     std::string p = dir + "\\M1TP2Readme.txt";
                     ShellExecuteA(nullptr, "open", p.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
                     statusNote = "Opened M1TP2Readme.txt";
                 }
                 if (!hasPatchTxt) ImGui::EndDisabled();
 
-                ImGui::SameLine();
+                ImGui::SameLine(0.0f, S(10.0f));
                 if (!hasReadmeTxt) ImGui::BeginDisabled();
-                if (ImGui::Button("Original ReadMe", ImVec2(145.0f, 32.0f))) {
+                if (ImGui::Button("Original ReadMe", ImVec2(docInnerW * 0.165f, btnH))) {
                     std::string p = dir + "\\ReadMe.txt";
                     ShellExecuteA(nullptr, "open", p.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
                     statusNote = "Opened ReadMe.txt";
                 }
                 if (!hasReadmeTxt) ImGui::EndDisabled();
 
-                ImGui::SameLine();
-                if (ImGui::Button("Open Mods Folder", ImVec2(165.0f, 32.0f))) {
+                ImGui::SameLine(0.0f, S(10.0f));
+                if (ImGui::Button("Open Mods Folder", ImVec2(docInnerW * 0.190f, btnH))) {
                     std::string mp = dir + "\\mods";
                     CreateDirectoryA(mp.c_str(), nullptr);
                     ShellExecuteA(nullptr, "open", mp.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
@@ -604,78 +756,225 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
 
                 ImGui::Spacing();
 
-                // Quick Launch Settings Panel (3 Columns, synced directly with m1tp2_recomp.ini)
-                ImGui::BeginChild("##QuickSettingsPanel", ImVec2(contentW, 275.0f), ImGuiChildFlags_Borders);
-                ImGui::SetCursorPos(ImVec2(14.0f, 10.0f));
-                ImGui::TextColored(ImVec4(0.55f, 0.84f, 1.0f, 1.0f), "QUICK LAUNCH SETTINGS  (m1tp2_recomp.ini)");
+                // Comprehensive Pre-Launch Settings Panel (synced 2-way with m1tp2_recomp.ini & game.cfg)
+                ImGui::BeginChild("##QuickSettingsPanel", ImVec2(contentW, S(366.0f)), ImGuiChildFlags_Borders);
 
-                // Column 1: Graphics & Widescreen
-                ImGui::SetCursorPos(ImVec2(14.0f, 38.0f));
-                ImGui::BeginGroup();
-                ImGui::TextColored(ImVec4(0.88f, 0.82f, 0.45f, 1.0f), "Graphics & Widescreen");
-                const char* asp3d[] = { "Smart Hor+ 16:9", "All 3D Hor+", "4:3 Original", "Stretch Fill" };
-                ImGui::SetNextItemWidth(210.0f);
-                ImGui::Combo("3D Aspect", &cfg.aspectMode, asp3d, 4);
+                auto pctSlider = [](const char* label, float& v, float w) {
+                    int pct = std::clamp(static_cast<int>(std::lround(v * 100.0f)), 0, 100);
+                    ImGui::SetNextItemWidth(w);
+                    if (ImGui::SliderInt(label, &pct, 0, 100, "%d%%")) {
+                        v = static_cast<float>(pct) / 100.0f;
+                    }
+                };
 
-                const char* mapAsp[] = { "16:9 Fill", "4:3 Original", "16:10 Wide" };
-                ImGui::SetNextItemWidth(210.0f);
-                ImGui::Combo("Map Aspect", &cfg.mapAspectMode, mapAsp, 3);
+                if (ImGui::BeginTabBar("##LauncherSettingsTabs")) {
+                    if (ImGui::BeginTabItem("  Quick Launch, Audio & Gunnery  ")) {
+                        ImGui::Spacing();
+                        const float col1W = contentW * 0.195f;
+                        const float col2W = contentW * 0.190f;
+                        const float baseY = ImGui::GetCursorPosY();
 
-                const char* drawOpts[] = { "2.0 km (Stock)", "3.0 km (2x LOD)", "4.0 km (3x LOD)", "6.0 km (4x LOD)" };
-                ImGui::SetNextItemWidth(210.0f);
-                ImGui::Combo("Draw Dist", &cfg.drawDistMode, drawOpts, 4);
+                        // Column 1: Graphics & Widescreen
+                        ImGui::SetCursorPos(ImVec2(S(14.0f), baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.88f, 0.82f, 0.45f, 1.0f), "Graphics & Widescreen");
+                        const char* asp3d[] = { "Smart Hor+ (Auto)", "All 3D Hor+", "4:3 Original", "Stretch Fill" };
+                        ImGui::SetNextItemWidth(col1W);
+                        ImGui::Combo("3D Aspect", &cfg.aspectMode, asp3d, 4);
 
-                const int msaaVals[] = { 0, 2, 4, 8 };
-                const char* msaaLbls[] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
-                int msaaIdx = 0;
-                for (int i = 0; i < 4; ++i) if (msaaVals[i] == cfg.msaaSamples) msaaIdx = i;
-                ImGui::SetNextItemWidth(210.0f);
-                if (ImGui::Combo("MSAA", &msaaIdx, msaaLbls, 4)) cfg.msaaSamples = msaaVals[msaaIdx];
+                        const int mapVals[] = { 0, 2, 3, 4 };
+                        const char* mapAsp[] = { "Auto Native (4:3)", "16:10 Wide", "16:9 Wide", "Stretch Fill" };
+                        int mapIdx = 0;
+                        for (int i = 0; i < 4; ++i) if (mapVals[i] == cfg.mapAspectMode) mapIdx = i;
+                        ImGui::SetNextItemWidth(col1W);
+                        if (ImGui::Combo("Map Aspect", &mapIdx, mapAsp, 4)) cfg.mapAspectMode = mapVals[mapIdx];
 
-                const int afVals[] = { 1, 2, 4, 8, 16 };
-                const char* afLbls[] = { "Off (1x)", "2x AF", "4x AF", "8x AF", "16x AF" };
-                int afIdx = 0;
-                for (int i = 0; i < 5; ++i) if (afVals[i] == cfg.anisotropy) afIdx = i;
-                ImGui::SetNextItemWidth(210.0f);
-                if (ImGui::Combo("Anisotropy", &afIdx, afLbls, 5)) cfg.anisotropy = afVals[afIdx];
-                ImGui::EndGroup();
+                        const char* drawOpts[] = { "2.0 km (Stock)", "3.0 km (2x LOD)", "4.0 km (3x LOD)", "6.0 km (4x LOD)" };
+                        ImGui::SetNextItemWidth(col1W);
+                        ImGui::Combo("Draw Dist", &cfg.drawDistMode, drawOpts, 4);
 
-                // Column 2: Gunnery, Mouse & Ballistics
-                ImGui::SameLine(340.0f);
-                ImGui::BeginGroup();
-                ImGui::TextColored(ImVec4(0.98f, 0.65f, 0.36f, 1.0f), "Gunnery & Ballistic FCS");
-                const char* mouseModes[] = { "Precision Stick (Rec.)", "Direct Raw Mouse", "Stock 1998" };
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::Combo("Gunner Mouse", &cfg.gunnerMouseMode, mouseModes, 3);
+                        const int msaaVals[] = { 0, 2, 4, 8 };
+                        const char* msaaLbls[] = { "Off", "2x MSAA", "4x MSAA", "8x MSAA" };
+                        int msaaIdx = 0;
+                        for (int i = 0; i < 4; ++i) if (msaaVals[i] == cfg.msaaSamples) msaaIdx = i;
+                        ImGui::SetNextItemWidth(col1W);
+                        if (ImGui::Combo("MSAA", &msaaIdx, msaaLbls, 4)) cfg.msaaSamples = msaaVals[msaaIdx];
 
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::SliderFloat("Mouse Sens", &cfg.gunnerMouseSens, 0.25f, 3.00f, "%.2fx");
+                        const int afVals[] = { 1, 2, 4, 8, 16 };
+                        const char* afLbls[] = { "Off (1x)", "2x AF", "4x AF", "8x AF", "16x AF" };
+                        int afIdx = 0;
+                        for (int i = 0; i < 5; ++i) if (afVals[i] == cfg.anisotropy) afIdx = i;
+                        ImGui::SetNextItemWidth(col1W);
+                        if (ImGui::Combo("Anisotropy", &afIdx, afLbls, 5)) cfg.anisotropy = afVals[afIdx];
 
-                const char* leadModes[] = { "Smooth FCS (Rec.)", "Manual (No Auto-Lead)", "Stock 1998" };
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::Combo("Broadside FCS", &cfg.ballisticLeadMode, leadModes, 3);
+                        const char* fogOpts[] = { "Auto (Match Draw)", "Extended 2x", "Extended 4x", "Off (Clear)" };
+                        ImGui::SetNextItemWidth(col1W);
+                        ImGui::Combo("3D Fog", &cfg.fogMode, fogOpts, 4);
 
-                const char* fogOpts[] = { "Auto (Match Draw)", "Extended 2x", "Extended 4x", "Off (Clear)" };
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::Combo("3D Fog", &cfg.fogMode, fogOpts, 4);
+                        ImGui::SetNextItemWidth(col1W);
+                        ImGui::SliderFloat("3D Gamma", &cfg.gamma, 0.70f, 1.60f, "%.2f");
+                        ImGui::EndGroup();
 
-                ImGui::SetNextItemWidth(220.0f);
-                ImGui::SliderFloat("3D Gamma", &cfg.gamma, 0.70f, 1.60f, "%.2f");
-                ImGui::EndGroup();
+                        // Column 2: Audio Mixer & Gunnery FCS
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.340f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.45f, 0.86f, 1.00f, 1.0f), "Audio Mixer");
+                        ImGui::SameLine(0.0f, S(14.0f));
+                        ImGui::Checkbox("Mute All", &cfg.audioMute);
+                        if (cfg.audioMute) ImGui::BeginDisabled();
+                        pctSlider("Master",      cfg.audioMasterVol, col2W);
+                        pctSlider("Music",       cfg.audioMusicVol,  col2W);
+                        pctSlider("Weapons/SFX", cfg.audioSfxVol,    col2W);
+                        pctSlider("Engines",     cfg.audioEngineVol, col2W);
+                        pctSlider("Crew Voice",  cfg.audioVoiceVol,  col2W);
+                        if (cfg.audioMute) ImGui::EndDisabled();
 
-                // Column 3: Runtime & Campaign Toggles
-                ImGui::SameLine(695.0f);
-                ImGui::BeginGroup();
-                ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Runtime & Campaign");
-                ImGui::Checkbox("Borderless Fullscreen", &cfg.fullscreen);
-                ImGui::Checkbox("VSync", &cfg.vsync);
-                ImGui::Checkbox("Fast-Boot (Skip Intros)", &cfg.skipIntro);
-                ImGui::Checkbox("Show Launcher on Startup", &cfg.showLauncherOnStartup);
-                ImGui::Checkbox("Fix 1998 Campaign AI Bug", &cfg.fixCampaignFrontBug);
-                ImGui::Checkbox("Campaign Intel Sidebar", &cfg.campaignIntelHud);
-                ImGui::Checkbox("Enable mods/ VFS Loader", &cfg.enableMods);
-                ImGui::Checkbox("Show FPS / Stats HUD", &cfg.showStatsHud);
-                ImGui::EndGroup();
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.98f, 0.65f, 0.36f, 1.0f), "Gunnery & Ballistic FCS");
+                        const char* mouseModes[] = { "Precision Stick", "Direct Raw", "Stock 1998" };
+                        ImGui::SetNextItemWidth(col2W);
+                        ImGui::Combo("Gunner Aim", &cfg.gunnerMouseMode, mouseModes, 3);
+                        ImGui::SetNextItemWidth(col2W);
+                        ImGui::SliderFloat("Mouse Sens", &cfg.gunnerMouseSens, 0.25f, 3.00f, "%.2fx");
+                        const char* leadModes[] = { "Smooth FCS", "Manual Lead", "Stock 1998" };
+                        ImGui::SetNextItemWidth(col2W);
+                        ImGui::Combo("Broadside FCS", &cfg.ballisticLeadMode, leadModes, 3);
+                        ImGui::EndGroup();
+
+                        // Column 3: Runtime, Input & Campaign Toggles
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.680f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Runtime & Campaign");
+                        ImGui::Checkbox("Borderless Fullscreen", &cfg.fullscreen);
+                        ImGui::Checkbox("VSync", &cfg.vsync);
+                        ImGui::SameLine();
+                        ImGui::Checkbox("100 FPS Mode", &cfg.unlock100Fps);
+                        ImGui::Checkbox("Fast-Boot (Skip Intros)", &cfg.skipIntro);
+                        ImGui::Checkbox("Show Launcher on Startup", &cfg.showLauncherOnStartup);
+                        ImGui::Checkbox("Fix 1998 Campaign AI Bug", &cfg.fixCampaignFrontBug);
+                        ImGui::Checkbox("Campaign Intel Sidebar", &cfg.campaignIntelHud);
+                        ImGui::Checkbox("Enable mods/ VFS Loader", &cfg.enableMods);
+                        ImGui::Checkbox("Disable Joystick / Gamepad", &cfg.disableJoystick);
+                        ImGui::Checkbox("Show FPS / Stats HUD", &cfg.showStatsHud);
+                        if (stockCfg.loaded) {
+                            bool snd = (stockCfg.soundOn != 0);
+                            if (ImGui::Checkbox("Game Audio On (game.cfg)", &snd)) {
+                                stockCfg.soundOn = snd ? 1 : 0;
+                                stockCfg.dirty = true;
+                            }
+                        }
+                        ImGui::EndGroup();
+
+                        ImGui::EndTabItem();
+                    }
+
+                    if (ImGui::BeginTabItem("  Advanced Graphics, Filters & game.cfg  ")) {
+                        ImGui::Spacing();
+                        const float colW = contentW * 0.195f;
+                        const float baseY = ImGui::GetCursorPosY();
+
+                        // Column 1: Advanced 2D/3D Filtering & Window
+                        ImGui::SetCursorPos(ImVec2(S(14.0f), baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.88f, 0.82f, 0.45f, 1.0f), "Advanced Filters & Display");
+                        const char* menuAsp[] = { "Fill Screen", "4:3 Original (Rec.)", "16:10 Wide", "Crop Zoom" };
+                        ImGui::SetNextItemWidth(colW);
+                        ImGui::Combo("2D Menu Aspect", &cfg.menuAspectMode, menuAsp, 4);
+
+                        const char* texFilt[] = { "Trilinear (Mipmaps)", "Bilinear", "Nearest (Retro)", "Game Default" };
+                        ImGui::SetNextItemWidth(colW);
+                        ImGui::Combo("3D Tex Filter", &cfg.texFilter3D, texFilt, 4);
+
+                        ImGui::Checkbox("2D Menu Bilinear Filter (F11)", &cfg.linearFilter2D);
+                        ImGui::Checkbox("3D Cockpit / HUD Bilinear Filter", &cfg.linearFilterLfb);
+                        ImGui::Checkbox("Force Native Glide on D3D", &cfg.forceGlideOnD3D);
+
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Custom Window Size (0 = Native)");
+                        ImGui::SetNextItemWidth(colW * 0.6f);
+                        ImGui::InputInt("Width", &cfg.windowWidth, 0, 0);
+                        cfg.windowWidth = std::clamp(cfg.windowWidth, 0, 7680);
+                        ImGui::SetNextItemWidth(colW * 0.6f);
+                        ImGui::InputInt("Height", &cfg.windowHeight, 0, 0);
+                        cfg.windowHeight = std::clamp(cfg.windowHeight, 0, 4320);
+                        ImGui::EndGroup();
+
+                        // Column 2: Original M1TP2 game.cfg
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.365f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.45f, 0.86f, 1.00f, 1.0f), "Original Game Config (game.cfg)");
+                        if (stockCfg.loaded) {
+                            bool snd = (stockCfg.soundOn != 0);
+                            if (ImGui::Checkbox("Sound Enabled (game.cfg)", &snd)) {
+                                stockCfg.soundOn = snd ? 1 : 0; stockCfg.dirty = true;
+                            }
+                            bool hiDet = (stockCfg.detailHigh != 0);
+                            if (ImGui::Checkbox("High 3D Detail Level", &hiDet)) {
+                                stockCfg.detailHigh = hiDet ? 1 : 0; stockCfg.dirty = true;
+                            }
+                            bool alpha = (stockCfg.alphaBlend != 0);
+                            if (ImGui::Checkbox("Alpha Blending (Smoke/FX)", &alpha)) {
+                                stockCfg.alphaBlend = alpha ? 1 : 0; stockCfg.dirty = true;
+                            }
+                            const char* rends[] = { "Software (2D)", "Glide HD (Recommended)", "Direct3D (Auto->Glide)" };
+                            ImGui::SetNextItemWidth(colW);
+                            if (ImGui::Combo("Renderer", &stockCfg.renderMode, rends, 3)) {
+                                stockCfg.dirty = true;
+                            }
+                            ImGui::SetNextItemWidth(colW * 0.85f);
+                            if (ImGui::InputText("Player Name", stockCfg.playerName, sizeof(stockCfg.playerName))) {
+                                stockCfg.dirty = true;
+                            }
+                            ImGui::SetNextItemWidth(colW * 0.85f);
+                            if (ImGui::InputText("Host Name", stockCfg.hostName, sizeof(stockCfg.hostName))) {
+                                stockCfg.dirty = true;
+                            }
+                        } else {
+                            ImGui::TextDisabled("game.cfg not found yet (created on first run).");
+                        }
+                        ImGui::EndGroup();
+
+                        // Column 3: Maintenance & Logs
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.710f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Maintenance & Logs");
+                        const float mBtnW = contentW * 0.255f;
+                        const float mBtnH = S(30.0f);
+                        if (ImGui::Button("Reset Audio Mixer to 100%", ImVec2(mBtnW, mBtnH))) {
+                            cfg.audioMute = false;
+                            cfg.audioMasterVol = cfg.audioMusicVol = cfg.audioSfxVol = 1.0f;
+                            cfg.audioEngineVol = cfg.audioVoiceVol = 1.0f;
+                            statusNote = "Audio Mixer reset to 100%";
+                        }
+                        if (ImGui::Button("Reset All Recomp Defaults", ImVec2(mBtnW, mBtnH))) {
+                            cfg = LauncherCfg{};
+                            statusNote = "Restored default m1tp2_recomp.ini settings";
+                        }
+                        ImGui::Spacing();
+                        std::string logPath   = dir + "\\m1tp2_recomp.log";
+                        std::string crashPath = dir + "\\m1tp2_crash.log";
+                        bool hasLog   = FileExists(logPath);
+                        bool hasCrash = FileExists(crashPath);
+                        if (!hasLog) ImGui::BeginDisabled();
+                        if (ImGui::Button("Open Runtime Log", ImVec2(mBtnW, mBtnH))) {
+                            ShellExecuteA(nullptr, "open", logPath.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+                            statusNote = "Opened m1tp2_recomp.log";
+                        }
+                        if (!hasLog) ImGui::EndDisabled();
+                        if (!hasCrash) ImGui::BeginDisabled();
+                        if (ImGui::Button("Open Crash Log", ImVec2(mBtnW, mBtnH))) {
+                            ShellExecuteA(nullptr, "open", crashPath.c_str(), nullptr, dir.c_str(), SW_SHOWNORMAL);
+                            statusNote = "Opened m1tp2_crash.log";
+                        }
+                        if (!hasCrash) ImGui::EndDisabled();
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("All settings auto-save on launch/exit.");
+                        ImGui::EndGroup();
+
+                        ImGui::EndTabItem();
+                    }
+                    ImGui::EndTabBar();
+                }
 
                 ImGui::EndChild();
 
@@ -689,7 +988,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.68f, 0.35f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(0.12f, 0.48f, 0.24f, 1.0f));
                 const char* btnLabel = (selCard == 0) ? "LAUNCH  M1 TANK PLATOON II" : "LAUNCH  WAR COLLEGE (DSG)";
-                if (ImGui::Button(btnLabel, ImVec2(360.0f, 46.0f))) {
+                if (ImGui::Button(btnLabel, ImVec2(S(360.0f), S(46.0f)))) {
                     launchChoice = selCard;
                     running = false;
                 }
@@ -705,10 +1004,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                     ImGui::TextDisabled("  Tip: Press F12 anytime in-game for settings & Quick Keys");
                 }
 
-                ImGui::SameLine(contentW - 120.0f);
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(contentRightX - S(120.0f));
                 ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.36f, 0.14f, 0.14f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.50f, 0.18f, 0.18f, 1.0f));
-                if (ImGui::Button("Quit", ImVec2(120.0f, 46.0f))) {
+                if (ImGui::Button("Quit", ImVec2(S(120.0f), S(46.0f)))) {
                     launchChoice = 2;
                     running = false;
                 }
@@ -725,8 +1025,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
         SDL_GL_SwapWindow(win);
     }
 
-    // Always save updated INI settings on exit or launch
+    // Always save updated INI & stock game.cfg settings on exit or launch
     SaveIni(iniPath, cfg);
+    SaveStockGameCfg(stockCfgPath, stockCfg);
 
     if (keysTex) glDeleteTextures(1, &keysTex);
     ImGui_ImplOpenGL3_Shutdown();

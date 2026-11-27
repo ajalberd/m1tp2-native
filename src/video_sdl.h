@@ -7,6 +7,7 @@ namespace m1 {
 void VideoSDLInstallHooks();
 void VideoSDLShutdown();
 void VideoApplyDisplaySettings();
+void VideoApplyFrameRateCap();
 
 SDL_Window* VideoGetWindow();
 void VideoGetViewport(bool is3D, int& vx, int& vy, int& vw, int& vh);
