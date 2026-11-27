@@ -270,6 +270,7 @@ struct Config {
     bool forceGlideOnD3D       = true;
     bool skipIntro             = true;  // Skip startup logo/intro Smacker videos
     bool showLauncherOnStartup = true;  // Open M1TP2 Native GUI Launcher on startup
+    bool checkForUpdates       = true;  // Check GitHub Releases for newer versions on launcher startup
     bool enableMods            = true;  // Enable native mods/ VFS override loader
     bool fixCampaignFrontBug   = true;  // Fix 1998 AI-front /10 bug at 0x42A395
     bool campaignIntelHud      = true;  // Show Campaign Win/Loss & Front Intel on campaign screens

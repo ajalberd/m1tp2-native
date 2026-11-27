@@ -8,6 +8,8 @@
 
 #include <windows.h>
 #include <shellapi.h>
+#include <winhttp.h>
+#include <bcrypt.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 
@@ -20,14 +22,23 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
+
+constexpr const char* kLauncherVersion = "0.3.1";
+constexpr const char* kGithubLatestUrl = "https://api.github.com/repos/ajalberd/m1tp2-native/releases/latest";
 
 struct LauncherCfg {
     int   windowWidth           = 0;
@@ -49,6 +60,7 @@ struct LauncherCfg {
     bool  forceGlideOnD3D       = true;
     bool  skipIntro             = true;
     bool  showLauncherOnStartup = true;
+    bool  checkForUpdates       = true;
     bool  enableMods            = true;
     bool  fixCampaignFrontBug   = true;
     bool  campaignIntelHud      = true;
@@ -147,6 +159,7 @@ static void LoadIni(const std::string& path, LauncherCfg& c) {
             if (_stricmp(k, "ForceGlideOnD3D") == 0)       c.forceGlideOnD3D       = (std::atoi(v) != 0);
             if (_stricmp(k, "SkipIntro") == 0)             c.skipIntro             = (std::atoi(v) != 0);
             if (_stricmp(k, "ShowLauncherOnStartup") == 0) c.showLauncherOnStartup = (std::atoi(v) != 0);
+            if (_stricmp(k, "CheckForUpdates") == 0)       c.checkForUpdates       = (std::atoi(v) != 0);
             if (_stricmp(k, "EnableMods") == 0)            c.enableMods            = (std::atoi(v) != 0);
             if (_stricmp(k, "FixCampaignFrontBug") == 0)   c.fixCampaignFrontBug   = (std::atoi(v) != 0);
             if (_stricmp(k, "CampaignIntelHud") == 0)      c.campaignIntelHud      = (std::atoi(v) != 0);
@@ -197,6 +210,7 @@ static void SaveIni(const std::string& path, const LauncherCfg& c) {
     std::fprintf(f, "ForceGlideOnD3D = %d\n", c.forceGlideOnD3D ? 1 : 0);
     std::fprintf(f, "SkipIntro = %d\n", c.skipIntro ? 1 : 0);
     std::fprintf(f, "ShowLauncherOnStartup = %d\n", c.showLauncherOnStartup ? 1 : 0);
+    std::fprintf(f, "CheckForUpdates = %d\n", c.checkForUpdates ? 1 : 0);
     std::fprintf(f, "EnableMods = %d\n", c.enableMods ? 1 : 0);
     std::fprintf(f, "FixCampaignFrontBug = %d\n", c.fixCampaignFrontBug ? 1 : 0);
     std::fprintf(f, "CampaignIntelHud = %d\n", c.campaignIntelHud ? 1 : 0);
@@ -355,6 +369,359 @@ static void ApplyLauncherTheme() {
     c[ImGuiCol_ButtonActive]     = ImVec4(0.16f, 0.42f, 0.30f, 1.00f);
 }
 
+// ==================== Native WinHTTP + BCrypt SHA-256 GitHub Auto-Updater ====================
+
+enum class UpdatePhase : int {
+    Idle = 0,
+    Checking,
+    UpToDate,
+    Available,
+    Downloading,
+    Verifying,
+    ReadyToInstall,
+    Error,
+};
+
+struct UpdaterState {
+    std::atomic<int>      phase{static_cast<int>(UpdatePhase::Idle)};
+    std::atomic<bool>     cancel{false};
+    std::atomic<uint64_t> dlBytes{0};
+    std::atomic<uint64_t> dlTotal{0};
+
+    std::mutex  mtx;
+    std::string latestTag;
+    std::string releaseUrl;
+    std::string setupUrl;
+    std::string setupName;
+    std::string sumsUrl;
+    std::string downloadedExe;
+    std::string errorMsg;
+};
+
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), w.data(), n);
+    return w;
+}
+
+static bool ParseSemVer(const std::string& tag, int& maj, int& min, int& pat) {
+    maj = min = pat = 0;
+    const char* p = tag.c_str();
+    while (*p && (*p == 'v' || *p == 'V' || *p == ' ')) ++p;
+    return std::sscanf(p, "%d.%d.%d", &maj, &min, &pat) >= 2;
+}
+
+static bool IsNewerSemVer(const std::string& remoteTag, const std::string& localVer) {
+    int rMaj, rMin, rPat, lMaj, lMin, lPat;
+    if (!ParseSemVer(remoteTag, rMaj, rMin, rPat)) return false;
+    if (!ParseSemVer(localVer,  lMaj, lMin, lPat)) return false;
+    if (rMaj != lMaj) return rMaj > lMaj;
+    if (rMin != lMin) return rMin > lMin;
+    return rPat > lPat;
+}
+
+static bool WinHttpFetch(const std::string& url,
+                         std::string* outStr,
+                         const std::string* outFilePath,
+                         const std::shared_ptr<UpdaterState>& st,
+                         std::string& errOut) {
+    std::wstring wurl = Utf8ToWide(url);
+    URL_COMPONENTS uc{};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t hostBuf[256] = {};
+    wchar_t pathBuf[2048] = {};
+    uc.lpszHostName     = hostBuf;
+    uc.dwHostNameLength = 256;
+    uc.lpszUrlPath      = pathBuf;
+    uc.dwUrlPathLength  = 2048;
+    if (!WinHttpCrackUrl(wurl.c_str(), 0, 0, &uc)) {
+        errOut = "Invalid URL";
+        return false;
+    }
+
+    std::wstring ua = L"m1tp2-native/" + Utf8ToWide(kLauncherVersion);
+    HINTERNET hSess = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSess) {
+        hSess = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                            WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    }
+    if (!hSess) { errOut = "WinHttpOpen failed"; return false; }
+
+    WinHttpSetTimeouts(hSess, 5000, 5000, 10000, 20000);
+    DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(hSess, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof(redir));
+
+    HINTERNET hConn = WinHttpConnect(hSess, hostBuf, uc.nPort, 0);
+    if (!hConn) {
+        WinHttpCloseHandle(hSess);
+        errOut = "Connection failed";
+        return false;
+    }
+
+    DWORD reqFlags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", pathBuf, nullptr,
+                                        WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, reqFlags);
+    if (!hReq) {
+        WinHttpCloseHandle(hConn);
+        WinHttpCloseHandle(hSess);
+        errOut = "Request creation failed";
+        return false;
+    }
+
+    const wchar_t* hdrs = L"Accept: application/vnd.github+json\r\n";
+    BOOL ok = WinHttpSendRequest(hReq, hdrs, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+              && WinHttpReceiveResponse(hReq, nullptr);
+    if (!ok) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(hConn);
+        WinHttpCloseHandle(hSess);
+        errOut = "Network unreachable";
+        return false;
+    }
+
+    DWORD status = 0, statusSz = sizeof(status);
+    WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                        WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSz, WINHTTP_NO_HEADER_INDEX);
+    if (status != 200) {
+        WinHttpCloseHandle(hReq);
+        WinHttpCloseHandle(hConn);
+        WinHttpCloseHandle(hSess);
+        errOut = "HTTP " + std::to_string(status);
+        return false;
+    }
+
+    if (outFilePath && st) {
+        wchar_t lenBuf[64] = {};
+        DWORD lenSz = sizeof(lenBuf);
+        if (WinHttpQueryHeaders(hReq, WINHTTP_QUERY_CONTENT_LENGTH,
+                                WINHTTP_HEADER_NAME_BY_INDEX, lenBuf, &lenSz, WINHTTP_NO_HEADER_INDEX)) {
+            st->dlTotal.store(static_cast<uint64_t>(_wcstoui64(lenBuf, nullptr, 10)));
+        }
+        st->dlBytes.store(0);
+    }
+
+    FILE* fp = nullptr;
+    if (outFilePath) {
+        fp = std::fopen(outFilePath->c_str(), "wb");
+        if (!fp) {
+            WinHttpCloseHandle(hReq);
+            WinHttpCloseHandle(hConn);
+            WinHttpCloseHandle(hSess);
+            errOut = "Failed to open temp file";
+            return false;
+        }
+    }
+
+    std::vector<char> buf(65536);
+    bool success = true;
+    while (true) {
+        if (st && st->cancel.load()) { success = false; errOut = "Cancelled"; break; }
+        DWORD avail = 0;
+        if (!WinHttpQueryDataAvailable(hReq, &avail)) { success = false; errOut = "Read error"; break; }
+        if (avail == 0) break;
+        DWORD toRead = std::min<DWORD>(avail, static_cast<DWORD>(buf.size()));
+        DWORD got = 0;
+        if (!WinHttpReadData(hReq, buf.data(), toRead, &got)) { success = false; errOut = "Download interrupted"; break; }
+        if (got == 0) break;
+        if (outStr) outStr->append(buf.data(), got);
+        if (fp) {
+            if (std::fwrite(buf.data(), 1, got, fp) != got) { success = false; errOut = "Disk write failed"; break; }
+            if (st) st->dlBytes.fetch_add(got);
+        }
+    }
+
+    if (fp) std::fclose(fp);
+    WinHttpCloseHandle(hReq);
+    WinHttpCloseHandle(hConn);
+    WinHttpCloseHandle(hSess);
+    if (!success && outFilePath) DeleteFileA(outFilePath->c_str());
+    return success;
+}
+
+static bool ExtractJsonStringField(const std::string& json, const std::string& key, size_t startPos,
+                                   std::string& outVal, size_t* outNextPos = nullptr) {
+    std::string pat = "\"" + key + "\"";
+    size_t pos = json.find(pat, startPos);
+    if (pos == std::string::npos) return false;
+    pos = json.find(':', pos + pat.size());
+    if (pos == std::string::npos) return false;
+    pos = json.find('"', pos + 1);
+    if (pos == std::string::npos) return false;
+    ++pos;
+    std::string val;
+    while (pos < json.size() && json[pos] != '"') {
+        if (json[pos] == '\\' && pos + 1 < json.size()) {
+            ++pos;
+        }
+        val.push_back(json[pos++]);
+    }
+    outVal = val;
+    if (outNextPos) *outNextPos = (pos < json.size()) ? (pos + 1) : pos;
+    return true;
+}
+
+static bool ComputeFileSha256Hex(const std::string& path, std::string& outHex) {
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+
+    BCRYPT_ALG_HANDLE hAlg = nullptr;
+    BCRYPT_HASH_HANDLE hHash = nullptr;
+    bool ok = false;
+    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0) {
+        if (BCryptCreateHash(hAlg, &hHash, nullptr, 0, nullptr, 0, 0) == 0) {
+            std::vector<uint8_t> buf(65536);
+            bool ioOk = true;
+            while (size_t rd = std::fread(buf.data(), 1, buf.size(), f)) {
+                if (BCryptHashData(hHash, buf.data(), static_cast<ULONG>(rd), 0) != 0) {
+                    ioOk = false;
+                    break;
+                }
+            }
+            uint8_t digest[32] = {};
+            if (ioOk && BCryptFinishHash(hHash, digest, sizeof(digest), 0) == 0) {
+                char hex[65];
+                for (int i = 0; i < 32; ++i) std::snprintf(hex + i * 2, 3, "%02x", digest[i]);
+                outHex = hex;
+                ok = true;
+            }
+            BCryptDestroyHash(hHash);
+        }
+        BCryptCloseAlgorithmProvider(hAlg, 0);
+    }
+    std::fclose(f);
+    return ok;
+}
+
+static void StartUpdateCheck(const std::shared_ptr<UpdaterState>& st) {
+    int cur = st->phase.load();
+    if (cur == static_cast<int>(UpdatePhase::Checking) ||
+        cur == static_cast<int>(UpdatePhase::Downloading) ||
+        cur == static_cast<int>(UpdatePhase::Verifying)) {
+        return;
+    }
+    st->phase.store(static_cast<int>(UpdatePhase::Checking));
+    std::thread([st]() {
+        std::string body, err;
+        if (!WinHttpFetch(kGithubLatestUrl, &body, nullptr, st, err)) {
+            if (!st->cancel.load()) {
+                std::lock_guard<std::mutex> lk(st->mtx);
+                st->errorMsg = err;
+                st->phase.store(static_cast<int>(UpdatePhase::Error));
+            }
+            return;
+        }
+        std::string tag, htmlUrl;
+        if (!ExtractJsonStringField(body, "tag_name", 0, tag)) {
+            std::lock_guard<std::mutex> lk(st->mtx);
+            st->errorMsg = "Could not parse release tag";
+            st->phase.store(static_cast<int>(UpdatePhase::Error));
+            return;
+        }
+        ExtractJsonStringField(body, "html_url", 0, htmlUrl);
+
+        std::string setupUrl, setupName, sumsUrl;
+        size_t scanPos = body.find("\"assets\"");
+        if (scanPos == std::string::npos) scanPos = 0;
+        std::string dlUrl;
+        while (ExtractJsonStringField(body, "browser_download_url", scanPos, dlUrl, &scanPos)) {
+            size_t sl = dlUrl.find_last_of('/');
+            std::string fname = (sl != std::string::npos) ? dlUrl.substr(sl + 1) : dlUrl;
+            if (fname.find("Setup") != std::string::npos && fname.size() > 4 &&
+                _stricmp(fname.c_str() + fname.size() - 4, ".exe") == 0) {
+                setupUrl  = dlUrl;
+                setupName = fname;
+            } else if (_stricmp(fname.c_str(), "SHA256SUMS.txt") == 0) {
+                sumsUrl = dlUrl;
+            }
+        }
+
+        std::lock_guard<std::mutex> lk(st->mtx);
+        st->latestTag  = tag;
+        st->releaseUrl = htmlUrl;
+        st->setupUrl   = setupUrl;
+        st->setupName  = setupName;
+        st->sumsUrl    = sumsUrl;
+        if (IsNewerSemVer(tag, kLauncherVersion) && !setupUrl.empty()) {
+            st->phase.store(static_cast<int>(UpdatePhase::Available));
+        } else {
+            st->phase.store(static_cast<int>(UpdatePhase::UpToDate));
+        }
+    }).detach();
+}
+
+static void StartUpdateDownload(const std::shared_ptr<UpdaterState>& st) {
+    std::string setupUrl, setupName, sumsUrl;
+    {
+        std::lock_guard<std::mutex> lk(st->mtx);
+        setupUrl  = st->setupUrl;
+        setupName = st->setupName;
+        sumsUrl   = st->sumsUrl;
+    }
+    if (setupUrl.empty() || setupName.empty()) return;
+
+    st->phase.store(static_cast<int>(UpdatePhase::Downloading));
+    std::thread([st, setupUrl, setupName, sumsUrl]() {
+        char tmpBuf[MAX_PATH] = {};
+        if (GetTempPathA(MAX_PATH, tmpBuf) == 0) {
+            std::lock_guard<std::mutex> lk(st->mtx);
+            st->errorMsg = "Temp path unavailable";
+            st->phase.store(static_cast<int>(UpdatePhase::Error));
+            return;
+        }
+        std::string updDir = std::string(tmpBuf) + "m1tp2_update";
+        CreateDirectoryA(updDir.c_str(), nullptr);
+        std::string destPath = updDir + "\\" + setupName;
+
+        std::string err;
+        if (!WinHttpFetch(setupUrl, nullptr, &destPath, st, err)) {
+            if (!st->cancel.load()) {
+                std::lock_guard<std::mutex> lk(st->mtx);
+                st->errorMsg = "Download failed: " + err;
+                st->phase.store(static_cast<int>(UpdatePhase::Error));
+            }
+            return;
+        }
+
+        st->phase.store(static_cast<int>(UpdatePhase::Verifying));
+        if (!sumsUrl.empty()) {
+            std::string sumsBody, sumsErr;
+            if (WinHttpFetch(sumsUrl, &sumsBody, nullptr, st, sumsErr)) {
+                std::string expectedHash;
+                size_t p = 0;
+                while (p < sumsBody.size()) {
+                    size_t nl = sumsBody.find('\n', p);
+                    std::string line = (nl == std::string::npos) ? sumsBody.substr(p) : sumsBody.substr(p, nl - p);
+                    p = (nl == std::string::npos) ? sumsBody.size() : (nl + 1);
+                    if (line.find(setupName) != std::string::npos && line.size() >= 64) {
+                        expectedHash = line.substr(0, 64);
+                        break;
+                    }
+                }
+                if (!expectedHash.empty()) {
+                    std::string actualHash;
+                    if (!ComputeFileSha256Hex(destPath, actualHash) ||
+                        _stricmp(actualHash.c_str(), expectedHash.c_str()) != 0) {
+                        DeleteFileA(destPath.c_str());
+                        std::lock_guard<std::mutex> lk(st->mtx);
+                        st->errorMsg = "SHA-256 verification failed!";
+                        st->phase.store(static_cast<int>(UpdatePhase::Error));
+                        return;
+                    }
+                }
+            }
+        }
+
+        if (!st->cancel.load()) {
+            std::lock_guard<std::mutex> lk(st->mtx);
+            st->downloadedExe = destPath;
+            st->phase.store(static_cast<int>(UpdatePhase::ReadyToInstall));
+        }
+    }).detach();
+}
+
 } // namespace
 
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
@@ -460,6 +827,11 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
     int   launchChoice  = -1; // -1=none, 0=M1TP2, 1=WarCollege, 2=Quit
     std::string statusNote;
 
+    auto updater = std::make_shared<UpdaterState>();
+    if (cfg.checkForUpdates) {
+        StartUpdateCheck(updater);
+    }
+
     bool running = true;
     while (running) {
         SDL_Event ev;
@@ -535,6 +907,81 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(0.90f, 0.94f, 0.98f, 1.0f), "NATIVE LAUNCHER");
             ImGui::SetWindowFontScale(1.0f);
+            ImGui::SameLine(0.0f, S(10.0f));
+            ImGui::TextColored(ImVec4(0.55f, 0.66f, 0.78f, 1.0f), "v%s", kLauncherVersion);
+
+            // Non-intrusive GitHub Release Auto-Update Banner (top-right of header)
+            {
+                auto uPhase = static_cast<UpdatePhase>(updater->phase.load());
+                if (uPhase == UpdatePhase::ReadyToInstall) {
+                    std::string exePath;
+                    {
+                        std::lock_guard<std::mutex> lk(updater->mtx);
+                        exePath = updater->downloadedExe;
+                    }
+                    SaveIni(iniPath, cfg);
+                    SaveStockGameCfg(stockCfgPath, stockCfg);
+                    char cmdBuf[MAX_PATH * 4];
+                    std::snprintf(cmdBuf, sizeof(cmdBuf), "\"%s\" /S /W=%lu /R /D=\"%s\"",
+                                  exePath.c_str(), static_cast<unsigned long>(GetCurrentProcessId()), dir.c_str());
+                    STARTUPINFOA si{};
+                    PROCESS_INFORMATION pi{};
+                    si.cb = sizeof(si);
+                    if (CreateProcessA(nullptr, cmdBuf, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+                        CloseHandle(pi.hThread);
+                        CloseHandle(pi.hProcess);
+                        launchChoice = 2;
+                        running = false;
+                    } else {
+                        std::lock_guard<std::mutex> lk(updater->mtx);
+                        updater->errorMsg = "Failed to launch updater executable";
+                        updater->phase.store(static_cast<int>(UpdatePhase::Error));
+                    }
+                } else if (uPhase == UpdatePhase::Available) {
+                    std::string tag, relUrl;
+                    {
+                        std::lock_guard<std::mutex> lk(updater->mtx);
+                        tag = updater->latestTag;
+                        relUrl = updater->releaseUrl;
+                    }
+                    float updBtnW   = S(165.0f);
+                    float notesBtnW = S(84.0f);
+                    float rightW    = updBtnW + notesBtnW + S(8.0f);
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + S(10.0f), contentRightX - rightW));
+                    ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.14f, 0.56f, 0.28f, 1.0f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.68f, 0.35f, 1.0f));
+                    char lbl[64];
+                    std::snprintf(lbl, sizeof(lbl), "Update to %s", tag.c_str());
+                    if (ImGui::Button(lbl, ImVec2(updBtnW, S(28.0f)))) {
+                        StartUpdateDownload(updater);
+                    }
+                    ImGui::PopStyleColor(2);
+                    ImGui::SameLine(0.0f, S(8.0f));
+                    if (ImGui::Button("Notes", ImVec2(notesBtnW, S(28.0f))) && !relUrl.empty()) {
+                        ShellExecuteA(nullptr, "open", relUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                } else if (uPhase == UpdatePhase::Downloading || uPhase == UpdatePhase::Verifying) {
+                    uint64_t got = updater->dlBytes.load();
+                    uint64_t tot = updater->dlTotal.load();
+                    float frac = (uPhase == UpdatePhase::Verifying) ? 1.0f
+                               : ((tot > 0) ? static_cast<float>(static_cast<double>(got) / static_cast<double>(tot)) : 0.0f);
+                    char ovl[64];
+                    if (uPhase == UpdatePhase::Verifying) {
+                        std::snprintf(ovl, sizeof(ovl), "Verifying SHA-256...");
+                    } else if (tot > 0) {
+                        std::snprintf(ovl, sizeof(ovl), "Downloading %.1f / %.1f MB",
+                                      got / (1024.0 * 1024.0), tot / (1024.0 * 1024.0));
+                    } else {
+                        std::snprintf(ovl, sizeof(ovl), "Downloading %.1f MB...", got / (1024.0 * 1024.0));
+                    }
+                    float barW = S(245.0f);
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + S(10.0f), contentRightX - barW));
+                    ImGui::ProgressBar(frac, ImVec2(barW, S(26.0f)), ovl);
+                }
+            }
+
             ImGui::TextColored(ImVec4(0.64f, 0.72f, 0.82f, 1.0f),
                 "SDL3 + OpenGL 3.3 HD Glide  |  True Hor+ Widescreen  |  Precision Gunnery & FCS  |  F12 In-Game Overlay");
             ImGui::Spacing();
@@ -934,12 +1381,34 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                         }
                         ImGui::EndGroup();
 
-                        // Column 3: Maintenance & Logs
+                        // Column 3: Updates, Maintenance & Logs
                         ImGui::SetCursorPos(ImVec2(contentW * 0.710f, baseY));
                         ImGui::BeginGroup();
-                        ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Maintenance & Logs");
+                        ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Updates, Maintenance & Logs");
                         const float mBtnW = contentW * 0.255f;
-                        const float mBtnH = S(30.0f);
+                        const float mBtnH = S(28.0f);
+                        ImGui::Checkbox("Check for Updates on Startup", &cfg.checkForUpdates);
+                        {
+                            auto up = static_cast<UpdatePhase>(updater->phase.load());
+                            bool busy = (up == UpdatePhase::Checking || up == UpdatePhase::Downloading || up == UpdatePhase::Verifying);
+                            if (busy) ImGui::BeginDisabled();
+                            if (ImGui::Button("Check for Updates Now", ImVec2(mBtnW, mBtnH))) {
+                                StartUpdateCheck(updater);
+                            }
+                            if (busy) ImGui::EndDisabled();
+
+                            std::lock_guard<std::mutex> lk(updater->mtx);
+                            if (up == UpdatePhase::Checking) {
+                                ImGui::TextColored(ImVec4(0.65f, 0.82f, 0.98f, 1.0f), "Checking GitHub Releases...");
+                            } else if (up == UpdatePhase::UpToDate) {
+                                ImGui::TextColored(ImVec4(0.42f, 0.95f, 0.55f, 1.0f), "Up to date (v%s)", kLauncherVersion);
+                            } else if (up == UpdatePhase::Available) {
+                                ImGui::TextColored(ImVec4(0.98f, 0.85f, 0.32f, 1.0f), "Update %s ready (click top-right)", updater->latestTag.c_str());
+                            } else if (up == UpdatePhase::Error) {
+                                ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.40f, 1.0f), "Update check: %s", updater->errorMsg.c_str());
+                            }
+                        }
+                        ImGui::Spacing();
                         if (ImGui::Button("Reset Audio Mixer to 100%", ImVec2(mBtnW, mBtnH))) {
                             cfg.audioMute = false;
                             cfg.audioMasterVol = cfg.audioMusicVol = cfg.audioSfxVol = 1.0f;
@@ -950,7 +1419,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                             cfg = LauncherCfg{};
                             statusNote = "Restored default m1tp2_recomp.ini settings";
                         }
-                        ImGui::Spacing();
                         std::string logPath   = dir + "\\m1tp2_recomp.log";
                         std::string crashPath = dir + "\\m1tp2_crash.log";
                         bool hasLog   = FileExists(logPath);
@@ -967,8 +1435,6 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                             statusNote = "Opened m1tp2_crash.log";
                         }
                         if (!hasCrash) ImGui::EndDisabled();
-                        ImGui::Spacing();
-                        ImGui::TextDisabled("All settings auto-save on launch/exit.");
                         ImGui::EndGroup();
 
                         ImGui::EndTabItem();
@@ -1024,6 +1490,8 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(win);
     }
+
+    updater->cancel.store(true);
 
     // Always save updated INI & stock game.cfg settings on exit or launch
     SaveIni(iniPath, cfg);

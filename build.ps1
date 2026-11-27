@@ -127,7 +127,7 @@ Write-Host "Building m1tp2_native.exe GUI Launcher (SDL3 + OpenGL 3.3 + Dear ImG
     -I"$sdlRoot\include" -I"$imguiDir" -I"$imguiDir\backends" -I"$stbDir" `
     "$src\m1tp2_launcher.cpp" `
     $imguiObjs `
-    "$sdlRoot\lib\libSDL3.dll.a" -lopengl32 -luser32 -lkernel32 -lshell32 `
+    "$sdlRoot\lib\libSDL3.dll.a" -lopengl32 -luser32 -lkernel32 -lshell32 -lwinhttp -lbcrypt `
     -o "$build\m1tp2_native.exe"
 if ($LASTEXITCODE -ne 0) { throw "Failed to build m1tp2_native.exe" }
 

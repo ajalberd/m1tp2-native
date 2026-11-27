@@ -11,7 +11,7 @@
 #include <stdlib.h>
 
 #define APP_TITLE       "M1 Tank Platoon II - Native Setup"
-#define APP_VERSION     "v0.3.0"
+#define APP_VERSION     "v0.3.1"
 #define PAYLOAD_MAGIC   "M1NATV01"
 
 #define IDC_PATH_EDIT   101
@@ -296,6 +296,7 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 "ForceGlideOnD3D = 1\n"
                 "SkipIntro = %d\n"
                 "ShowLauncherOnStartup = 1\n"
+                "CheckForUpdates = 1\n"
                 "EnableMods = 1\n"
                 "FixCampaignFrontBug = 1\n"
                 "CampaignIntelHud = 1\n"
@@ -677,14 +678,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-static int ParseSilentArgs(const char* cmd, int* outSilent, int* outUninstall, char* outDir, size_t cap) {
-    *outSilent = 0;
+static int ParseSilentArgs(const char* cmd, int* outSilent, int* outUninstall, int* outRelaunch,
+                           DWORD* outWaitPid, char* outDir, size_t cap) {
+    *outSilent    = 0;
     *outUninstall = 0;
-    outDir[0] = '\0';
+    *outRelaunch  = 0;
+    *outWaitPid   = 0;
+    outDir[0]     = '\0';
     if (!cmd || !cmd[0]) return 0;
 
-    if (strstr(cmd, "/S") || strstr(cmd, "/s") || strstr(cmd, "--silent")) *outSilent = 1;
+    if (strstr(cmd, "/S") || strstr(cmd, "/s") || strstr(cmd, "--silent"))    *outSilent = 1;
     if (strstr(cmd, "/U") || strstr(cmd, "/u") || strstr(cmd, "--uninstall")) *outUninstall = 1;
+    if (strstr(cmd, "/R") || strstr(cmd, "/r") || strstr(cmd, "--relaunch"))  *outRelaunch = 1;
+
+    const char* w = strstr(cmd, "/W=");
+    if (!w) w = strstr(cmd, "/w=");
+    if (w) {
+        *outWaitPid = (DWORD)strtoul(w + 3, NULL, 10);
+    }
 
     const char* d = strstr(cmd, "/D=");
     if (!d) d = strstr(cmd, "/d=");
@@ -708,16 +719,40 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmdLine, int nShowC
     (void)hPrev; (void)nShowCmd;
     GetModuleFileNameA(NULL, g_selfPath, MAX_PATH);
 
-    // Silent CLI mode: /S /D="C:\Path\To\M1TP2" or /U /D="C:\Path\To\M1TP2"
-    int silent = 0, uninst = 0;
+    // Silent CLI mode:
+    //   /S /D="C:\Path\To\M1TP2"                  (silent install)
+    //   /S /W=<pid> /R /D="C:\Path\To\M1TP2"      (self-update: wait for PID, install preserving game.cfg, relaunch)
+    //   /U /D="C:\Path\To\M1TP2"                  (silent uninstall + restore backups)
+    int silent = 0, uninst = 0, relaunch = 0;
+    DWORD waitPid = 0;
     char cliDir[MAX_PATH] = {0};
-    if (ParseSilentArgs(lpCmdLine, &silent, &uninst, cliDir, sizeof(cliDir))) {
+    if (ParseSilentArgs(lpCmdLine, &silent, &uninst, &relaunch, &waitPid, cliDir, sizeof(cliDir))) {
+        if (waitPid != 0) {
+            HANDLE hProc = OpenProcess(SYNCHRONIZE, FALSE, waitPid);
+            if (hProc) {
+                WaitForSingleObject(hProc, 15000);
+                CloseHandle(hProc);
+            }
+            Sleep(150);
+        }
         if (!cliDir[0]) DetectGameDir(cliDir, sizeof(cliDir));
         char err[512] = {0};
         if (uninst) {
             return DoUninstall(cliDir, err, sizeof(err)) ? 0 : 1;
         }
-        return DoInstall(cliDir, 1, 0, 1, err, sizeof(err)) ? 0 : 1;
+        // When self-updating (/R), pass doGlideOpt=0 so existing user game.cfg is never overwritten
+        if (!DoInstall(cliDir, 1, 0, relaunch ? 0 : 1, err, sizeof(err))) {
+            if (relaunch) {
+                MessageBoxA(NULL, err, APP_TITLE " (Auto-Update)", MB_OK | MB_ICONERROR);
+            }
+            return 1;
+        }
+        if (relaunch) {
+            char exe[MAX_PATH];
+            snprintf(exe, sizeof(exe), "%s\\m1tp2_native.exe", cliDir);
+            ShellExecuteA(NULL, "open", exe, "--launcher", cliDir, SW_SHOWNORMAL);
+        }
+        return 0;
     }
 
     InitCommonControls();

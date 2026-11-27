@@ -197,6 +197,7 @@ void LoadConfig() {
             if (_stricmp(key, "ForceGlideOnD3D") == 0) g_cfg.forceGlideOnD3D = (std::atoi(val) != 0);
             if (_stricmp(key, "SkipIntro") == 0)             g_cfg.skipIntro             = (std::atoi(val) != 0);
             if (_stricmp(key, "ShowLauncherOnStartup") == 0) g_cfg.showLauncherOnStartup = (std::atoi(val) != 0);
+            if (_stricmp(key, "CheckForUpdates") == 0)       g_cfg.checkForUpdates       = (std::atoi(val) != 0);
             if (_stricmp(key, "EnableMods") == 0)            g_cfg.enableMods            = (std::atoi(val) != 0);
             if (_stricmp(key, "FixCampaignFrontBug") == 0)   g_cfg.fixCampaignFrontBug   = (std::atoi(val) != 0);
             if (_stricmp(key, "CampaignIntelHud") == 0)      g_cfg.campaignIntelHud      = (std::atoi(val) != 0);
@@ -250,6 +251,7 @@ void SaveConfig() {
     std::fprintf(f, "ForceGlideOnD3D = %d\n", g_cfg.forceGlideOnD3D ? 1 : 0);
     std::fprintf(f, "SkipIntro = %d\n", g_cfg.skipIntro ? 1 : 0);
     std::fprintf(f, "ShowLauncherOnStartup = %d\n", g_cfg.showLauncherOnStartup ? 1 : 0);
+    std::fprintf(f, "CheckForUpdates = %d\n", g_cfg.checkForUpdates ? 1 : 0);
     std::fprintf(f, "EnableMods = %d\n", g_cfg.enableMods ? 1 : 0);
     std::fprintf(f, "FixCampaignFrontBug = %d\n", g_cfg.fixCampaignFrontBug ? 1 : 0);
     std::fprintf(f, "CampaignIntelHud = %d\n", g_cfg.campaignIntelHud ? 1 : 0);

@@ -56,16 +56,16 @@ A **100% native SDL3 + OpenGL 3.3 Core + Dear ImGui** modernization, HD renderer
 ## Quick Install (End Users)
 
 1. Install your owned copy of **M1 Tank Platoon II** (GOG.com or retail v1.2).
-2. Download **`M1TP2-Native-Setup-v0.3.0.exe`** from the [Releases](https://github.com/ajalberd/m1tp2-native/releases) page.
+2. Download **`M1TP2-Native-Setup-v0.3.1.exe`** from the [Releases](https://github.com/ajalberd/m1tp2-native/releases) page.
 3. Run the installer — it automatically detects your M1TP2 folder, backs up any old `ddraw.dll` / DDrawCompat files to `_m1tp2_backup\`, installs the native runtime & Quickstart Keyboard Layout, configures Glide HD mode, and creates a Desktop shortcut.
-4. Launch via **`m1tp2_native.exe`** (or the Desktop shortcut) to open the **Native Launcher**. Press **`F12`** in-game anytime to tune display, audio mixer, gunnery/FCS, campaign, mods, or view Quick Keys!
+4. Launch via **`m1tp2_native.exe`** (or the Desktop shortcut) to open the **Native Launcher** (which checks GitHub Releases for future 1-click updates). Press **`F12`** in-game anytime to tune display, audio mixer, gunnery/FCS, campaign, mods, or view Quick Keys!
 
-> **Portable / Manual Install:** Download `M1TP2-Native-v0.3.0-portable.zip`, back up any existing `ddraw.dll` (e.g. GOG's DDrawCompat), extract the ZIP into your M1TP2 root folder (next to `M1TP2.exe`), and run `m1tp2_native.exe`.
+> **Portable / Manual Install:** Download `M1TP2-Native-v0.3.1-portable.zip`, back up any existing `ddraw.dll` (e.g. GOG's DDrawCompat), extract the ZIP into your M1TP2 root folder (next to `M1TP2.exe`), and run `m1tp2_native.exe`.
 
 > **Silent CLI Install / Uninstall:**
 > ```powershell
-> .\M1TP2-Native-Setup-v0.3.0.exe /S /D="C:\GOG Games\M1 Tank Platoon II"
-> .\M1TP2-Native-Setup-v0.3.0.exe /U /D="C:\GOG Games\M1 Tank Platoon II"
+> .\M1TP2-Native-Setup-v0.3.1.exe /S /D="C:\GOG Games\M1 Tank Platoon II"
+> .\M1TP2-Native-Setup-v0.3.1.exe /U /D="C:\GOG Games\M1 Tank Platoon II"
 > ```
 
 ---
@@ -106,7 +106,7 @@ python tools\m1tp2_modtool.py new-mod my_first_mod
 .\build.ps1 -GameDir "C:\GOG Games\M1 Tank Platoon II"
 
 # Build the standalone 1-shot GUI installer + portable ZIP into .\dist\
-.\package_release.ps1 -Version "0.3.0"
+.\package_release.ps1 -Version "0.3.1"
 ```
 
 ---
