@@ -277,7 +277,21 @@ struct Config {
     int  gunnerMouseMode       = GUNNER_PRECISION_STICK;
     float gunnerMouseSens      = 1.0f;  // 0.25x .. 3.00x
     int  ballisticLeadMode     = LEAD_SMOOTH_FCS;
-    bool disableJoystick       = true;  // Ignore WinMM joysticks/HOTAS/gamepads unless enabled
+    bool disableJoystick       = true;  // Ignore joysticks/HOTAS/gamepads unless enabled
+    char  joyDeviceName[128]   = "Auto"; // "Auto" or exact SDL3 joystick hardware name
+    int   joyAxisX             = 0;     // -1 = None, 0..15 = physical axis index
+    int   joyAxisY             = 1;
+    int   joyAxisZ             = 2;
+    int   joyAxisR             = 3;
+    bool  joyInvertX           = false;
+    bool  joyInvertY           = false;
+    bool  joyInvertZ           = false;
+    bool  joyInvertR           = false;
+    float joyDeadzone          = 0.08f; // 0.00 .. 0.40
+    int   joyBtn1              = 0;     // -1 = Unbound, 0..31 = physical button index
+    int   joyBtn2              = 1;
+    int   joyBtn3              = 2;
+    int   joyBtn4              = 3;
     bool  audioMute            = false;
     float audioMasterVol       = 1.0f;  // 0.00 .. 1.00
     float audioMusicVol        = 1.0f;  // Menu / briefing / victory music

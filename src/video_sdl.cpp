@@ -269,7 +269,7 @@ static void UpdatePaletteTable(const uint8_t* rgb768, int start, int count) {
 HWND __cdecl Hook_CreateGameWindow(HINSTANCE /*hInst*/) {
     LogPrintf("[VIDEO] CreateGameWindow -> initializing SDL3 + OpenGL 3.3\n");
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_JOYSTICK)) {
         LogPrintf("[VIDEO] SDL_Init FAILED: %s\n", SDL_GetError());
         return nullptr;
     }
@@ -619,34 +619,6 @@ void __cdecl Hook_IntroSmacker(const char* path, int x, int y, int flags) {
     reinterpret_cast<PlaySmkFn>(addr::PlaySmacker)(path, x, y, flags);
 }
 
-using JoyGetPosExFn    = uint32_t(__stdcall*)(uint32_t uJoyID, void* pji);
-using JoyGetDevCapsAFn = uint32_t(__stdcall*)(uintptr_t uJoyID, void* pjc, uint32_t cbjc);
-
-JoyGetPosExFn    g_origJoyGetPosEx    = nullptr;
-JoyGetDevCapsAFn g_origJoyGetDevCapsA = nullptr;
-
-constexpr uint32_t kJoyErrUnplugged = 167u; // JOYERR_UNPLUGGED (0xA7)
-
-uint32_t __stdcall Hook_joyGetPosEx(uint32_t uJoyID, void* pji) {
-    if (g_cfg.disableJoystick) return kJoyErrUnplugged;
-    return g_origJoyGetPosEx ? g_origJoyGetPosEx(uJoyID, pji) : kJoyErrUnplugged;
-}
-
-uint32_t __stdcall Hook_joyGetDevCapsA(uintptr_t uJoyID, void* pjc, uint32_t cbjc) {
-    if (g_cfg.disableJoystick) return kJoyErrUnplugged;
-    return g_origJoyGetDevCapsA ? g_origJoyGetDevCapsA(uJoyID, pjc, cbjc) : kJoyErrUnplugged;
-}
-
-static void InstallJoystickHooks() {
-    g_origJoyGetPosEx    = reinterpret_cast<JoyGetPosExFn>(mem<uintptr_t>(addr::IatJoyGetPosEx));
-    g_origJoyGetDevCapsA = reinterpret_cast<JoyGetDevCapsAFn>(mem<uintptr_t>(addr::IatJoyGetDevCapsA));
-    uintptr_t pPos  = reinterpret_cast<uintptr_t>(&Hook_joyGetPosEx);
-    uintptr_t pCaps = reinterpret_cast<uintptr_t>(&Hook_joyGetDevCapsA);
-    WriteBytes(addr::IatJoyGetPosEx,    &pPos,  sizeof(pPos));
-    WriteBytes(addr::IatJoyGetDevCapsA, &pCaps, sizeof(pCaps));
-    LogPrintf("[INPUT] WinMM joystick IAT hooks installed (disableJoystick=%d)\n", g_cfg.disableJoystick ? 1 : 0);
-}
-
 // High-precision 10 ms tick counter replacing M1TP2's GetTickCount() / 10 (0x438CB0).
 // Eliminates Windows' 15.625 ms GetTickCount quantum jitter and yields cleanly during
 // the main loop's frame-wait spin at 0x41E372 while keeping simulation speed 100% 1x real-time.
@@ -933,7 +905,6 @@ void VideoSDLInstallHooks() {
     InstallCall(addr::IntroCallCredits,   reinterpret_cast<void*>(&Hook_IntroSmacker));
     InstallJump(addr::GetTicks10ms,       reinterpret_cast<void*>(&Hook_GetTicks10ms));
     VideoApplyFrameRateCap();
-    InstallJoystickHooks();
     LogPrintf("[VIDEO] SDL3/OpenGL 2D + Window + Input + Smacker + SkipIntro + Hi-Res Timer hooks installed\n");
 }
 

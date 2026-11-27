@@ -11,7 +11,7 @@
 #include <stdlib.h>
 
 #define APP_TITLE       "M1 Tank Platoon II - Native Setup"
-#define APP_VERSION     "v0.3.1"
+#define APP_VERSION     "v0.3.2"
 #define PAYLOAD_MAGIC   "M1NATV01"
 
 #define IDC_PATH_EDIT   101
@@ -254,6 +254,7 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 DWORD rd = 0;
                 if (ReadFile(h, buf, sz, &rd, NULL) && rd == sz) {
                     int32_t* ints = (int32_t*)buf;
+                    ints[0] = 0; // Menu Music = OFF (Default)
                     ints[1] = 1; // Detail Level = HIGH
                     ints[2] = 1; // Render Mode = GLIDE (Native OpenGL HD)
                     ints[3] = 1; // Alpha Blending = ON
@@ -306,6 +307,20 @@ static void UpgradeGameCfgAndIni(const char* gameDir, int enableGlideAndSkipIntr
                 "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n"
                 "BallisticLeadMode = 0\n"
                 "DisableJoystick = 1\n"
+                "JoyDeviceName = Auto\n"
+                "JoyAxisX = 0\n"
+                "JoyAxisY = 1\n"
+                "JoyAxisZ = 2\n"
+                "JoyAxisR = 3\n"
+                "JoyInvertX = 0\n"
+                "JoyInvertY = 0\n"
+                "JoyInvertZ = 0\n"
+                "JoyInvertR = 0\n"
+                "JoyDeadzone = 0.08\n"
+                "JoyBtn1 = 0\n"
+                "JoyBtn2 = 1\n"
+                "JoyBtn3 = 2\n"
+                "JoyBtn4 = 3\n"
                 "AudioMute = 0\n"
                 "AudioMasterVol = 1.00\n"
                 "AudioMusicVol = 1.00\n"
@@ -450,6 +465,32 @@ static int DoInstall(const char* gameDir, int doBackup, int doShortcut, int doGl
     return 1;
 }
 
+static int DesktopShortcutMatchesDir(const char* lnkPath, const char* gameDir) {
+    char expectedExe[MAX_PATH];
+    snprintf(expectedExe, sizeof(expectedExe), "%s\\m1tp2_native.exe", gameDir);
+
+    HRESULT hr = CoInitialize(NULL);
+    IShellLinkA* psl = NULL;
+    int match = 0;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, &IID_IShellLinkA, (void**)&psl))) {
+        IPersistFile* ppf = NULL;
+        if (SUCCEEDED(IShellLinkA_QueryInterface(psl, &IID_IPersistFile, (void**)&ppf))) {
+            WCHAR wpath[MAX_PATH];
+            MultiByteToWideChar(CP_ACP, 0, lnkPath, -1, wpath, MAX_PATH);
+            if (SUCCEEDED(IPersistFile_Load(ppf, wpath, STGM_READ))) {
+                char target[MAX_PATH] = {0};
+                if (SUCCEEDED(IShellLinkA_GetPath(psl, target, MAX_PATH, NULL, 0))) {
+                    if (_stricmp(target, expectedExe) == 0) match = 1;
+                }
+            }
+            IPersistFile_Release(ppf);
+        }
+        IShellLinkA_Release(psl);
+    }
+    if (SUCCEEDED(hr)) CoUninitialize();
+    return match;
+}
+
 static int DoUninstall(const char* gameDir, char* errMsg, size_t errCap) {
     if (!HasM1TP2Exe(gameDir)) {
         snprintf(errMsg, errCap, "M1TP2.exe was not found in:\n%s", gameDir);
@@ -486,7 +527,8 @@ static int DoUninstall(const char* gameDir, char* errMsg, size_t errCap) {
     RemoveDirectoryA(bakDir);
 
     char lnkPath[MAX_PATH];
-    if (GetDesktopShortcutPath(lnkPath, sizeof(lnkPath)) && FileExistsA(lnkPath)) {
+    if (GetDesktopShortcutPath(lnkPath, sizeof(lnkPath)) && FileExistsA(lnkPath) &&
+        DesktopShortcutMatchesDir(lnkPath, gameDir)) {
         DeleteFileA(lnkPath);
     }
     return 1;

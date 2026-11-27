@@ -37,7 +37,7 @@
 
 namespace {
 
-constexpr const char* kLauncherVersion = "0.3.1";
+constexpr const char* kLauncherVersion = "0.3.2";
 constexpr const char* kGithubLatestUrl = "https://api.github.com/repos/ajalberd/m1tp2-native/releases/latest";
 
 struct LauncherCfg {
@@ -68,6 +68,20 @@ struct LauncherCfg {
     float gunnerMouseSens       = 1.0f;
     int   ballisticLeadMode     = 0;    // Smooth FCS
     bool  disableJoystick       = true;
+    std::string joyDeviceName   = "Auto";
+    int   joyAxisX              = 0;
+    int   joyAxisY              = 1;
+    int   joyAxisZ              = 2;
+    int   joyAxisR              = 3;
+    bool  joyInvertX            = false;
+    bool  joyInvertY            = false;
+    bool  joyInvertZ            = false;
+    bool  joyInvertR            = false;
+    float joyDeadzone           = 0.08f;
+    int   joyBtn1               = 0;
+    int   joyBtn2               = 1;
+    int   joyBtn3               = 2;
+    int   joyBtn4               = 3;
     bool  audioMute             = false;
     float audioMasterVol        = 1.0f;
     float audioMusicVol         = 1.0f;
@@ -80,7 +94,7 @@ struct LauncherCfg {
 struct StockGameCfg {
     bool    loaded      = false;
     bool    dirty       = false;
-    int32_t soundOn     = 1;
+    int32_t menuMusicOn = 0; // 0x872B80: menu/briefing music on/off (disabled by default)
     int32_t detailHigh  = 1;
     int32_t renderMode  = 1; // 0=SW, 1=Glide, 2=D3D
     int32_t alphaBlend  = 1;
@@ -98,11 +112,11 @@ static bool LoadStockGameCfg(const std::string& path, StockGameCfg& g) {
     if (rd < 20) return false;
     int32_t ints[5] = {};
     std::memcpy(ints, buf, sizeof(ints));
-    g.soundOn    = ints[0] ? 1 : 0;
-    g.detailHigh = ints[1] ? 1 : 0;
-    g.renderMode = std::clamp(ints[2], 0, 2);
-    g.alphaBlend = ints[3] ? 1 : 0;
-    g.extraFlag  = ints[4] ? 1 : 0;
+    g.menuMusicOn = ints[0] ? 1 : 0;
+    g.detailHigh  = ints[1] ? 1 : 0;
+    g.renderMode  = std::clamp(ints[2], 0, 2);
+    g.alphaBlend  = ints[3] ? 1 : 0;
+    g.extraFlag   = ints[4] ? 1 : 0;
     if (rd >= 38) {
         std::memcpy(g.hostName,   buf + 20, 8); g.hostName[8]   = '\0';
         std::memcpy(g.playerName, buf + 29, 8); g.playerName[8] = '\0';
@@ -114,7 +128,7 @@ static bool LoadStockGameCfg(const std::string& path, StockGameCfg& g) {
 static void SaveStockGameCfg(const std::string& path, const StockGameCfg& g) {
     if (!g.loaded || !g.dirty) return;
     uint8_t buf[38] = {};
-    int32_t ints[5] = { g.soundOn, g.detailHigh, g.renderMode, g.alphaBlend, g.extraFlag };
+    int32_t ints[5] = { g.menuMusicOn, g.detailHigh, g.renderMode, g.alphaBlend, g.extraFlag };
     std::memcpy(buf, ints, sizeof(ints));
     std::strncpy(reinterpret_cast<char*>(buf + 20), g.hostName, 8);
     std::strncpy(reinterpret_cast<char*>(buf + 29), g.playerName, 8);
@@ -136,7 +150,9 @@ static void LoadIni(const std::string& path, LauncherCfg& c) {
     while (std::fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == ';') continue;
         char k[128], v[128];
-        if (std::sscanf(line, " %127[^= \t] = %127s", k, v) == 2) {
+        if (std::sscanf(line, " %127[^= \t] = %127[^\r\n]", k, v) == 2) {
+            size_t vlen = std::strlen(v);
+            while (vlen > 0 && (v[vlen - 1] == ' ' || v[vlen - 1] == '\t')) v[--vlen] = '\0';
             if (_stricmp(k, "WindowWidth") == 0)           c.windowWidth           = std::atoi(v);
             if (_stricmp(k, "WindowHeight") == 0)          c.windowHeight          = std::atoi(v);
             if (_stricmp(k, "Fullscreen") == 0)            c.fullscreen            = (std::atoi(v) != 0);
@@ -167,6 +183,20 @@ static void LoadIni(const std::string& path, LauncherCfg& c) {
             if (_stricmp(k, "GunnerMouseSens") == 0)       c.gunnerMouseSens       = static_cast<float>(std::atof(v));
             if (_stricmp(k, "BallisticLeadMode") == 0)     c.ballisticLeadMode     = std::atoi(v);
             if (_stricmp(k, "DisableJoystick") == 0)       c.disableJoystick       = (std::atoi(v) != 0);
+            if (_stricmp(k, "JoyDeviceName") == 0)         c.joyDeviceName         = v;
+            if (_stricmp(k, "JoyAxisX") == 0)              c.joyAxisX              = std::atoi(v);
+            if (_stricmp(k, "JoyAxisY") == 0)              c.joyAxisY              = std::atoi(v);
+            if (_stricmp(k, "JoyAxisZ") == 0)              c.joyAxisZ              = std::atoi(v);
+            if (_stricmp(k, "JoyAxisR") == 0)              c.joyAxisR              = std::atoi(v);
+            if (_stricmp(k, "JoyInvertX") == 0)            c.joyInvertX            = (std::atoi(v) != 0);
+            if (_stricmp(k, "JoyInvertY") == 0)            c.joyInvertY            = (std::atoi(v) != 0);
+            if (_stricmp(k, "JoyInvertZ") == 0)            c.joyInvertZ            = (std::atoi(v) != 0);
+            if (_stricmp(k, "JoyInvertR") == 0)            c.joyInvertR            = (std::atoi(v) != 0);
+            if (_stricmp(k, "JoyDeadzone") == 0)           c.joyDeadzone           = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 0.40f);
+            if (_stricmp(k, "JoyBtn1") == 0)               c.joyBtn1               = std::atoi(v);
+            if (_stricmp(k, "JoyBtn2") == 0)               c.joyBtn2               = std::atoi(v);
+            if (_stricmp(k, "JoyBtn3") == 0)               c.joyBtn3               = std::atoi(v);
+            if (_stricmp(k, "JoyBtn4") == 0)               c.joyBtn4               = std::atoi(v);
             if (_stricmp(k, "AudioMute") == 0)             c.audioMute             = (std::atoi(v) != 0);
             if (_stricmp(k, "AudioMasterVol") == 0)        c.audioMasterVol        = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
             if (_stricmp(k, "AudioMusicVol") == 0)         c.audioMusicVol         = std::clamp(static_cast<float>(std::atof(v)), 0.0f, 1.0f);
@@ -220,6 +250,20 @@ static void SaveIni(const std::string& path, const LauncherCfg& c) {
     std::fprintf(f, "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n");
     std::fprintf(f, "BallisticLeadMode = %d\n", c.ballisticLeadMode);
     std::fprintf(f, "DisableJoystick = %d\n", c.disableJoystick ? 1 : 0);
+    std::fprintf(f, "JoyDeviceName = %s\n", c.joyDeviceName.empty() ? "Auto" : c.joyDeviceName.c_str());
+    std::fprintf(f, "JoyAxisX = %d\n", c.joyAxisX);
+    std::fprintf(f, "JoyAxisY = %d\n", c.joyAxisY);
+    std::fprintf(f, "JoyAxisZ = %d\n", c.joyAxisZ);
+    std::fprintf(f, "JoyAxisR = %d\n", c.joyAxisR);
+    std::fprintf(f, "JoyInvertX = %d\n", c.joyInvertX ? 1 : 0);
+    std::fprintf(f, "JoyInvertY = %d\n", c.joyInvertY ? 1 : 0);
+    std::fprintf(f, "JoyInvertZ = %d\n", c.joyInvertZ ? 1 : 0);
+    std::fprintf(f, "JoyInvertR = %d\n", c.joyInvertR ? 1 : 0);
+    std::fprintf(f, "JoyDeadzone = %.2f\n", c.joyDeadzone);
+    std::fprintf(f, "JoyBtn1 = %d\n", c.joyBtn1);
+    std::fprintf(f, "JoyBtn2 = %d\n", c.joyBtn2);
+    std::fprintf(f, "JoyBtn3 = %d\n", c.joyBtn3);
+    std::fprintf(f, "JoyBtn4 = %d\n", c.joyBtn4);
     std::fprintf(f, "AudioMute = %d\n", c.audioMute ? 1 : 0);
     std::fprintf(f, "AudioMasterVol = %.2f\n", c.audioMasterVol);
     std::fprintf(f, "AudioMusicVol = %.2f\n", c.audioMusicVol);
@@ -269,25 +313,8 @@ static bool LaunchWarCollege(const std::string& dir) {
     PROCESS_INFORMATION pi{};
     si.cb = sizeof(si);
 
-    // 1. Prefer otvdmw.exe if installed
-    char otvdm[MAX_PATH] = {};
-    std::string localOtvdm = dir + "\\otvdmw.exe";
-    if (FileExists(localOtvdm)) {
-        lstrcpynA(otvdm, localOtvdm.c_str(), MAX_PATH);
-    } else if (SearchPathA(nullptr, "otvdmw.exe", nullptr, MAX_PATH, otvdm, nullptr) == 0) {
-        otvdm[0] = '\0';
-    }
-    if (otvdm[0]) {
-        char cmd[MAX_PATH * 3];
-        std::snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\"", otvdm, omoExe.c_str(), staFile.c_str());
-        if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, dsgDir.c_str(), &si, &pi)) {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
-            return true;
-        }
-    }
-
-    // 2. Fallback to GOG's bundled BoxedWine (no console flash)
+    // 1. Prefer GOG's bundled BoxedWine FIRST: GOG pre-installed 16-bit QuickTime for Windows (QTW)
+    //    inside BoxedWine's Wine prefix, which OMOPLAY.EXE requires to play War College movies.
     std::string bwDir = dir + "\\Boxedwine";
     std::string bwExe = dir + "\\Boxedwine\\x64\\BoxedWine.exe";
     if (!FileExists(bwExe)) bwExe = dir + "\\Boxedwine\\x86\\BoxedWine.exe";
@@ -299,6 +326,24 @@ static bool LaunchWarCollege(const std::string& dir) {
             "../Dsg/OMOPLAY.EXE M1DSG.sta",
             bwExe.c_str());
         if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, bwDir.c_str(), &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return true;
+        }
+    }
+
+    // 2. Fallback to otvdmw.exe (for Retail CD installs without BoxedWine; requires Dsg\QT16.EXE installed)
+    char otvdm[MAX_PATH] = {};
+    std::string localOtvdm = dir + "\\otvdmw.exe";
+    if (FileExists(localOtvdm)) {
+        lstrcpynA(otvdm, localOtvdm.c_str(), MAX_PATH);
+    } else if (SearchPathA(nullptr, "otvdmw.exe", nullptr, MAX_PATH, otvdm, nullptr) == 0) {
+        otvdm[0] = '\0';
+    }
+    if (otvdm[0]) {
+        char cmd[MAX_PATH * 3];
+        std::snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" \"%s\"", otvdm, omoExe.c_str(), staFile.c_str());
+        if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, dsgDir.c_str(), &si, &pi)) {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
             return true;
@@ -769,7 +814,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
         return LaunchMainGame(dir) ? 0 : 1;
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_JOYSTICK)) {
         // Fallback: if SDL video fails for any reason, launch directly
         return hasGame ? (LaunchMainGame(dir) ? 0 : 1) : 1;
     }
@@ -832,6 +877,53 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
         StartUpdateCheck(updater);
     }
 
+    // Live SDL3 Joystick / HOTAS tester & binder state
+    struct JoyEntry {
+        SDL_JoystickID id = 0;
+        std::string    name;
+    };
+    std::vector<JoyEntry> joyDevices;
+    SDL_Joystick*         activeJoy      = nullptr;
+    SDL_JoystickID        activeJoyId    = 0;
+    int                   bindingBtnSlot = -1; // -1=none, 0..3 = waiting for button press for M1TP2 Btn 1..4
+    bool                  prevBtnState[32] = {};
+
+    auto RefreshJoyList = [&]() {
+        joyDevices.clear();
+        int cnt = 0;
+        if (SDL_JoystickID* ids = SDL_GetJoysticks(&cnt)) {
+            for (int i = 0; i < cnt; ++i) {
+                const char* nm = SDL_GetJoystickNameForID(ids[i]);
+                joyDevices.push_back({ ids[i], nm ? nm : ("Joystick #" + std::to_string(i + 1)) });
+            }
+            SDL_free(ids);
+        }
+        // Pick matching joystick to open for live testing
+        SDL_JoystickID wantId = 0;
+        if (!joyDevices.empty()) {
+            bool isAuto = (cfg.joyDeviceName.empty() || _stricmp(cfg.joyDeviceName.c_str(), "Auto") == 0);
+            if (!isAuto) {
+                for (const auto& d : joyDevices) {
+                    if (_stricmp(d.name.c_str(), cfg.joyDeviceName.c_str()) == 0) {
+                        wantId = d.id;
+                        break;
+                    }
+                }
+            }
+            if (wantId == 0) wantId = joyDevices[0].id;
+        }
+        if (wantId != activeJoyId) {
+            if (activeJoy) { SDL_CloseJoystick(activeJoy); activeJoy = nullptr; }
+            activeJoyId = 0;
+            if (wantId != 0) {
+                activeJoy = SDL_OpenJoystick(wantId);
+                if (activeJoy) activeJoyId = wantId;
+            }
+            std::memset(prevBtnState, 0, sizeof(prevBtnState));
+        }
+    };
+    RefreshJoyList();
+
     bool running = true;
     while (running) {
         SDL_Event ev;
@@ -841,9 +933,14 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                 launchChoice = 2;
                 running = false;
             }
+            if (ev.type == SDL_EVENT_JOYSTICK_ADDED || ev.type == SDL_EVENT_JOYSTICK_REMOVED) {
+                RefreshJoyList();
+            }
             if (ev.type == SDL_EVENT_KEY_DOWN && !ev.key.repeat) {
                 if (ev.key.scancode == SDL_SCANCODE_ESCAPE) {
-                    if (showKeysModal) {
+                    if (bindingBtnSlot >= 0) {
+                        bindingBtnSlot = -1;
+                    } else if (showKeysModal) {
                         showKeysModal = false;
                     } else {
                         launchChoice = 2;
@@ -1304,9 +1401,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                         ImGui::Checkbox("Disable Joystick / Gamepad", &cfg.disableJoystick);
                         ImGui::Checkbox("Show FPS / Stats HUD", &cfg.showStatsHud);
                         if (stockCfg.loaded) {
-                            bool snd = (stockCfg.soundOn != 0);
-                            if (ImGui::Checkbox("Game Audio On (game.cfg)", &snd)) {
-                                stockCfg.soundOn = snd ? 1 : 0;
+                            bool mus = (stockCfg.menuMusicOn != 0);
+                            if (ImGui::Checkbox("Menu Music (game.cfg)", &mus)) {
+                                stockCfg.menuMusicOn = mus ? 1 : 0;
                                 stockCfg.dirty = true;
                             }
                         }
@@ -1351,9 +1448,9 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
                         ImGui::BeginGroup();
                         ImGui::TextColored(ImVec4(0.45f, 0.86f, 1.00f, 1.0f), "Original Game Config (game.cfg)");
                         if (stockCfg.loaded) {
-                            bool snd = (stockCfg.soundOn != 0);
-                            if (ImGui::Checkbox("Sound Enabled (game.cfg)", &snd)) {
-                                stockCfg.soundOn = snd ? 1 : 0; stockCfg.dirty = true;
+                            bool mus = (stockCfg.menuMusicOn != 0);
+                            if (ImGui::Checkbox("Menu Music (game.cfg)", &mus)) {
+                                stockCfg.menuMusicOn = mus ? 1 : 0; stockCfg.dirty = true;
                             }
                             bool hiDet = (stockCfg.detailHigh != 0);
                             if (ImGui::Checkbox("High 3D Detail Level", &hiDet)) {
@@ -1439,6 +1536,231 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
 
                         ImGui::EndTabItem();
                     }
+
+                    if (ImGui::BeginTabItem("  Joystick & HOTAS Tester / Binder  ")) {
+                        ImGui::Spacing();
+                        SDL_UpdateJoysticks();
+                        if (activeJoy && !SDL_JoystickConnected(activeJoy)) {
+                            RefreshJoyList();
+                        }
+
+                        const float baseY = ImGui::GetCursorPosY();
+
+                        // Helper to read normalized axis [-1, +1] with deadzone & invert
+                        auto readNormAxis = [&](int axisIdx, bool inv, bool applyDz) -> float {
+                            if (!activeJoy || axisIdx < 0 || axisIdx >= SDL_GetNumJoystickAxes(activeJoy)) return 0.0f;
+                            int16_t raw = SDL_GetJoystickAxis(activeJoy, axisIdx);
+                            float v = (raw >= 0) ? (raw / 32767.0f) : (raw / 32768.0f);
+                            if (inv) v = -v;
+                            if (applyDz) {
+                                float dz = std::clamp(cfg.joyDeadzone, 0.0f, 0.40f);
+                                float a = std::fabs(v);
+                                if (a <= dz) return 0.0f;
+                                if (dz > 0.001f) v = (v >= 0.0f ? 1.0f : -1.0f) * ((a - dz) / (1.0f - dz));
+                            }
+                            return std::clamp(v, -1.0f, 1.0f);
+                        };
+
+                        // Capture next physical button press if user clicked "Bind..."
+                        if (bindingBtnSlot >= 0 && activeJoy) {
+                            int nb = std::min(SDL_GetNumJoystickButtons(activeJoy), 32);
+                            for (int b = 0; b < nb; ++b) {
+                                bool down = SDL_GetJoystickButton(activeJoy, b);
+                                if (down && !prevBtnState[b]) {
+                                    int* targets[4] = { &cfg.joyBtn1, &cfg.joyBtn2, &cfg.joyBtn3, &cfg.joyBtn4 };
+                                    *targets[bindingBtnSlot] = b;
+                                    statusNote = "Bound M1TP2 Button " + std::to_string(bindingBtnSlot + 1) +
+                                                 " -> Stick Btn " + std::to_string(b + 1);
+                                    bindingBtnSlot = -1;
+                                    break;
+                                }
+                            }
+                        }
+                        if (activeJoy) {
+                            int nb = std::min(SDL_GetNumJoystickButtons(activeJoy), 32);
+                            for (int b = 0; b < nb; ++b) prevBtnState[b] = SDL_GetJoystickButton(activeJoy, b);
+                        }
+
+                        // Column 1: Device Picker & Live 2D Visual Crosshair Tester
+                        ImGui::SetCursorPos(ImVec2(S(14.0f), baseY));
+                        ImGui::BeginGroup();
+                        bool joyEn = !cfg.disableJoystick;
+                        if (ImGui::Checkbox("Enable Joystick / HOTAS (SDL3)", &joyEn)) {
+                            cfg.disableJoystick = !joyEn;
+                        }
+                        ImGui::SameLine(0.0f, S(8.0f));
+                        if (ImGui::Button("Refresh", ImVec2(S(72.0f), 0.0f))) {
+                            RefreshJoyList();
+                            statusNote = joyDevices.empty() ? "No joysticks detected" : ("Detected " + std::to_string(joyDevices.size()) + " device(s)");
+                        }
+
+                        // Device dropdown
+                        std::string preview = (cfg.joyDeviceName.empty() || _stricmp(cfg.joyDeviceName.c_str(), "Auto") == 0)
+                            ? (joyDevices.empty() ? "No Stick Detected" : ("Auto (" + joyDevices[0].name + ")"))
+                            : cfg.joyDeviceName;
+                        ImGui::SetNextItemWidth(contentW * 0.31f);
+                        if (ImGui::BeginCombo("##JoyDevCombo", preview.c_str())) {
+                            bool isAuto = (cfg.joyDeviceName.empty() || _stricmp(cfg.joyDeviceName.c_str(), "Auto") == 0);
+                            if (ImGui::Selectable("Auto (First Detected)", isAuto)) {
+                                cfg.joyDeviceName = "Auto";
+                                RefreshJoyList();
+                            }
+                            for (const auto& d : joyDevices) {
+                                bool sel = (!isAuto && _stricmp(cfg.joyDeviceName.c_str(), d.name.c_str()) == 0);
+                                if (ImGui::Selectable(d.name.c_str(), sel)) {
+                                    cfg.joyDeviceName = d.name;
+                                    RefreshJoyList();
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+
+                        ImGui::Spacing();
+                        // Live 2D X/Y Stick Crosshair Box + Deadzone Ring
+                        const float boxSz = S(150.0f);
+                        ImVec2 p0 = ImGui::GetCursorScreenPos();
+                        ImVec2 p1 = ImVec2(p0.x + boxSz, p0.y + boxSz);
+                        ImVec2 ctr = ImVec2(p0.x + boxSz * 0.5f, p0.y + boxSz * 0.5f);
+                        float half = boxSz * 0.46f;
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        dl->AddRectFilled(p0, p1, IM_COL32(14, 22, 30, 255), S(4.0f));
+                        dl->AddRect(p0, p1, IM_COL32(60, 120, 95, 220), S(4.0f), 0, S(1.5f));
+                        dl->AddLine(ImVec2(ctr.x, p0.y + S(4.0f)), ImVec2(ctr.x, p1.y - S(4.0f)), IM_COL32(45, 75, 65, 180));
+                        dl->AddLine(ImVec2(p0.x + S(4.0f), ctr.y), ImVec2(p1.x - S(4.0f), ctr.y), IM_COL32(45, 75, 65, 180));
+                        if (cfg.joyDeadzone > 0.005f) {
+                            float dzR = half * std::clamp(cfg.joyDeadzone, 0.0f, 0.40f);
+                            dl->AddCircleFilled(ctr, dzR, IM_COL32(220, 160, 40, 38), 24);
+                            dl->AddCircle(ctr, dzR, IM_COL32(230, 175, 55, 150), 24, S(1.2f));
+                        }
+                        float rawX = readNormAxis(cfg.joyAxisX, cfg.joyInvertX, false);
+                        float rawY = readNormAxis(cfg.joyAxisY, cfg.joyInvertY, false);
+                        float outX = readNormAxis(cfg.joyAxisX, cfg.joyInvertX, true);
+                        float outY = readNormAxis(cfg.joyAxisY, cfg.joyInvertY, true);
+                        // Dim raw dot + bright green deadzone-filtered output dot
+                        dl->AddCircleFilled(ImVec2(ctr.x + rawX * half, ctr.y + rawY * half), S(3.5f), IM_COL32(150, 170, 190, 160));
+                        dl->AddCircleFilled(ImVec2(ctr.x + outX * half, ctr.y + outY * half), S(5.5f),
+                                            activeJoy ? IM_COL32(75, 245, 130, 255) : IM_COL32(100, 110, 120, 180));
+                        ImGui::Dummy(ImVec2(boxSz, boxSz));
+
+                        // Live Z / R / POV readout next to crosshair
+                        ImGui::SameLine(0.0f, S(12.0f));
+                        ImGui::BeginGroup();
+                        int nAxes = activeJoy ? SDL_GetNumJoystickAxes(activeJoy) : 0;
+                        int nBtns = activeJoy ? SDL_GetNumJoystickButtons(activeJoy) : 0;
+                        int nHats = activeJoy ? SDL_GetNumJoystickHats(activeJoy) : 0;
+                        ImGui::TextColored(activeJoy ? ImVec4(0.35f, 0.95f, 0.55f, 1.0f) : ImVec4(0.95f, 0.55f, 0.40f, 1.0f),
+                                           activeJoy ? "CONNECTED" : "NO DEVICE");
+                        ImGui::TextDisabled("%d axes | %d btns | %d hat", nAxes, nBtns, nHats);
+                        ImGui::Spacing();
+                        float barW = S(115.0f);
+                        int showAxes = std::min(nAxes, 4);
+                        for (int a = 0; a < showAxes; ++a) {
+                            float av = readNormAxis(a, false, false);
+                            char albl[24];
+                            std::snprintf(albl, sizeof(albl), "A%d: %+.2f", a, av);
+                            ImGui::ProgressBar(av * 0.5f + 0.5f, ImVec2(barW, S(17.0f)), albl);
+                        }
+                        if (nHats > 0) {
+                            uint8_t h = SDL_GetJoystickHat(activeJoy, 0);
+                            const char* hStr = (h == SDL_HAT_UP) ? "N" : (h == SDL_HAT_RIGHT) ? "E" :
+                                               (h == SDL_HAT_DOWN) ? "S" : (h == SDL_HAT_LEFT) ? "W" :
+                                               (h == SDL_HAT_RIGHTUP) ? "NE" : (h == SDL_HAT_RIGHTDOWN) ? "SE" :
+                                               (h == SDL_HAT_LEFTDOWN) ? "SW" : (h == SDL_HAT_LEFTUP) ? "NW" : "CTR";
+                            ImGui::Text("POV Hat: %s", hStr);
+                        }
+                        ImGui::EndGroup();
+
+                        // Live Button Grid (first 16 buttons)
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Live Buttons:");
+                        int showBtns = std::clamp(nBtns, 8, 16);
+                        for (int b = 0; b < showBtns; ++b) {
+                            if (b > 0 && b != 8) ImGui::SameLine(0.0f, S(4.0f));
+                            bool down = (activeJoy && b < nBtns && SDL_GetJoystickButton(activeJoy, b));
+                            ImGui::PushStyleColor(ImGuiCol_Button, down ? ImVec4(0.20f, 0.78f, 0.36f, 1.0f) : ImVec4(0.11f, 0.16f, 0.22f, 1.0f));
+                            char btxt[12];
+                            std::snprintf(btxt, sizeof(btxt), "%d", b + 1);
+                            ImGui::Button(btxt, ImVec2(S(26.0f), S(20.0f)));
+                            ImGui::PopStyleColor();
+                        }
+                        ImGui::EndGroup();
+
+                        // Column 2: Axis Mapping & Deadzone
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.355f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.88f, 0.82f, 0.45f, 1.0f), "Axis Mapping & Deadzone");
+                        const char* axisOpts[] = { "None", "Axis 0", "Axis 1", "Axis 2", "Axis 3", "Axis 4", "Axis 5", "Axis 6", "Axis 7" };
+                        auto axisRow = [&](const char* label, const char* invId, int& axisVal, bool& invVal) {
+                            int idx = std::clamp(axisVal + 1, 0, 8);
+                            ImGui::SetNextItemWidth(contentW * 0.135f);
+                            if (ImGui::Combo(label, &idx, axisOpts, 9)) axisVal = idx - 1;
+                            ImGui::SameLine(0.0f, S(8.0f));
+                            ImGui::Checkbox(invId, &invVal);
+                        };
+                        axisRow("X (Yaw/Turn)",   "Inv##X", cfg.joyAxisX, cfg.joyInvertX);
+                        axisRow("Y (Pitch/Move)", "Inv##Y", cfg.joyAxisY, cfg.joyInvertY);
+                        axisRow("Z (Throttle)",   "Inv##Z", cfg.joyAxisZ, cfg.joyInvertZ);
+                        axisRow("R (Rudder)",     "Inv##R", cfg.joyAxisR, cfg.joyInvertR);
+
+                        ImGui::Spacing();
+                        int dzPct = std::clamp(static_cast<int>(std::lround(cfg.joyDeadzone * 100.0f)), 0, 35);
+                        ImGui::SetNextItemWidth(contentW * 0.195f);
+                        if (ImGui::SliderInt("Deadzone", &dzPct, 0, 35, "%d%%")) {
+                            cfg.joyDeadzone = static_cast<float>(dzPct) / 100.0f;
+                        }
+                        ImGui::Spacing();
+                        if (ImGui::Button("Reset Default Stick Bindings", ImVec2(contentW * 0.275f, S(28.0f)))) {
+                            cfg.joyAxisX = 0; cfg.joyAxisY = 1; cfg.joyAxisZ = 2; cfg.joyAxisR = 3;
+                            cfg.joyInvertX = cfg.joyInvertY = cfg.joyInvertZ = cfg.joyInvertR = false;
+                            cfg.joyDeadzone = 0.08f;
+                            cfg.joyBtn1 = 0; cfg.joyBtn2 = 1; cfg.joyBtn3 = 2; cfg.joyBtn4 = 3;
+                            bindingBtnSlot = -1;
+                            statusNote = "Reset joystick axis & button bindings to defaults";
+                        }
+                        ImGui::Spacing();
+                        ImGui::TextWrapped("Bypasses 1998 WinMM slot-0 limit: any USB stick, HOTAS, pedals, or gamepad works.");
+                        ImGui::EndGroup();
+
+                        // Column 3: 1-Click Button Binder
+                        ImGui::SetCursorPos(ImVec2(contentW * 0.685f, baseY));
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.45f, 0.94f, 0.62f, 1.0f), "Button Binder (Click Bind, Press Stick)");
+                        const char* btnNames[4] = { "Btn 1 (Fire Gun)", "Btn 2 (Lase/Coax)", "Btn 3 (Aux 1)", "Btn 4 (Aux 2)" };
+                        int* btnPtrs[4] = { &cfg.joyBtn1, &cfg.joyBtn2, &cfg.joyBtn3, &cfg.joyBtn4 };
+                        for (int i = 0; i < 4; ++i) {
+                            ImGui::AlignTextToFramePadding();
+                            ImGui::Text("%-17s", btnNames[i]);
+                            ImGui::SameLine();
+                            bool waiting = (bindingBtnSlot == i);
+                            char bLbl[48];
+                            if (waiting) {
+                                std::snprintf(bLbl, sizeof(bLbl), "Press stick...##b%d", i);
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.45f, 0.12f, 1.0f));
+                            } else if (*btnPtrs[i] >= 0) {
+                                std::snprintf(bLbl, sizeof(bLbl), "Stick #%d##b%d", *btnPtrs[i] + 1, i);
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.30f, 0.42f, 1.0f));
+                            } else {
+                                std::snprintf(bLbl, sizeof(bLbl), "Unbound##b%d", i);
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.18f, 0.22f, 1.0f));
+                            }
+                            if (ImGui::Button(bLbl, ImVec2(S(102.0f), S(26.0f)))) {
+                                bindingBtnSlot = waiting ? -1 : i;
+                            }
+                            ImGui::PopStyleColor();
+                            ImGui::SameLine(0.0f, S(5.0f));
+                            char cLbl[16];
+                            std::snprintf(cLbl, sizeof(cLbl), "X##clr%d", i);
+                            if (ImGui::Button(cLbl, ImVec2(S(26.0f), S(26.0f)))) {
+                                *btnPtrs[i] = -1;
+                                if (bindingBtnSlot == i) bindingBtnSlot = -1;
+                            }
+                        }
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Tip: Uncheck 'Disable Joystick' or check\n'Enable Joystick / HOTAS' above to use\nyour stick in-game. Press Esc to cancel\nbutton capture.");
+                        ImGui::EndGroup();
+
+                        ImGui::EndTabItem();
+                    }
                     ImGui::EndTabBar();
                 }
 
@@ -1497,6 +1819,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR lpCmd, int) {
     SaveIni(iniPath, cfg);
     SaveStockGameCfg(stockCfgPath, stockCfg);
 
+    if (activeJoy) SDL_CloseJoystick(activeJoy);
     if (keysTex) glDeleteTextures(1, &keysTex);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

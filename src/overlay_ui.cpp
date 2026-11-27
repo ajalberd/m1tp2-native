@@ -5,6 +5,7 @@
 #include "campaign_hud.h"
 #include "gunnery.h"
 #include "audio_mixer.h"
+#include "joystick_sdl.h"
 #include "gl_loader.h"
 #include "common.h"
 
@@ -496,12 +497,19 @@ static void DrawGunneryWindow() {
     }
 
     if (ImGui::Checkbox("Disable Joystick / Gamepad Input", &g_cfg.disableJoystick)) {
-        // Reset M1TP2's joystick probe state so re-enabling works immediately without restart
-        mem<int32_t>(addr::g_JoyInitState) = 0;
+        JoystickSDLOnConfigChanged();
         changed = true;
     }
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Prevents M1TP2 from polling plugged-in joysticks, HOTAS, pedals, or gamepads\nthat can cause unwanted turret or steering drift.");
+        ImGui::SetTooltip("When unchecked, uses the SDL3 Joystick/HOTAS backend configured in the Launcher\n(works with any USB stick/HOTAS/gamepad regardless of WinMM slot).");
+    }
+    if (!g_cfg.disableJoystick) {
+        ImGui::TextColored(ImVec4(0.45f, 0.88f, 1.0f, 1.0f), "Active Stick: %s", JoystickSDLGetActiveName());
+        int dzPct = std::clamp(static_cast<int>(std::lround(g_cfg.joyDeadzone * 100.0f)), 0, 35);
+        if (ImGui::SliderInt("Stick Deadzone", &dzPct, 0, 35, "%d%%")) {
+            g_cfg.joyDeadzone = static_cast<float>(dzPct) / 100.0f;
+            changed = true;
+        }
     }
 
     ImGui::Separator();

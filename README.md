@@ -56,16 +56,16 @@ A **100% native SDL3 + OpenGL 3.3 Core + Dear ImGui** modernization, HD renderer
 ## Quick Install (End Users)
 
 1. Install your owned copy of **M1 Tank Platoon II** (GOG.com or retail v1.2).
-2. Download **`M1TP2-Native-Setup-v0.3.1.exe`** from the [Releases](https://github.com/ajalberd/m1tp2-native/releases) page.
+2. Download **`M1TP2-Native-Setup-v0.3.2.exe`** from the [Releases](https://github.com/ajalberd/m1tp2-native/releases) page.
 3. Run the installer — it automatically detects your M1TP2 folder, backs up any old `ddraw.dll` / DDrawCompat files to `_m1tp2_backup\`, installs the native runtime & Quickstart Keyboard Layout, configures Glide HD mode, and creates a Desktop shortcut.
 4. Launch via **`m1tp2_native.exe`** (or the Desktop shortcut) to open the **Native Launcher** (which checks GitHub Releases for future 1-click updates). Press **`F12`** in-game anytime to tune display, audio mixer, gunnery/FCS, campaign, mods, or view Quick Keys!
 
-> **Portable / Manual Install:** Download `M1TP2-Native-v0.3.1-portable.zip`, back up any existing `ddraw.dll` (e.g. GOG's DDrawCompat), extract the ZIP into your M1TP2 root folder (next to `M1TP2.exe`), and run `m1tp2_native.exe`.
+> **Portable / Manual Install:** Download `M1TP2-Native-v0.3.2-portable.zip`, back up any existing `ddraw.dll` (e.g. GOG's DDrawCompat), extract the ZIP into your M1TP2 root folder (next to `M1TP2.exe`), and run `m1tp2_native.exe`.
 
 > **Silent CLI Install / Uninstall:**
 > ```powershell
-> .\M1TP2-Native-Setup-v0.3.1.exe /S /D="C:\GOG Games\M1 Tank Platoon II"
-> .\M1TP2-Native-Setup-v0.3.1.exe /U /D="C:\GOG Games\M1 Tank Platoon II"
+> .\M1TP2-Native-Setup-v0.3.2.exe /S /D="C:\GOG Games\M1 Tank Platoon II"
+> .\M1TP2-Native-Setup-v0.3.2.exe /U /D="C:\GOG Games\M1 Tank Platoon II"
 > ```
 
 ---
@@ -106,7 +106,7 @@ python tools\m1tp2_modtool.py new-mod my_first_mod
 .\build.ps1 -GameDir "C:\GOG Games\M1 Tank Platoon II"
 
 # Build the standalone 1-shot GUI installer + portable ZIP into .\dist\
-.\package_release.ps1 -Version "0.3.1"
+.\package_release.ps1 -Version "0.3.2"
 ```
 
 ---
@@ -123,6 +123,7 @@ python tools\m1tp2_modtool.py new-mod my_first_mod
 | `src/campaign_hud.cpp` | 1998 AI-Front `/10` bugfix (`0x42A395`) and live Campaign State snapshot reader |
 | `src/gunnery.cpp` | Precision Stick / Direct Raw Mouse aiming (`0x43594F`, `0x41705D`, `0x41728C`) + Smooth FCS Broadside Lead (`0x406B74`) |
 | `src/audio_mixer.cpp` | Logarithmic 4-channel `MPSSNDR.DLL` audio mixer (`0x449C10` / `0x449C60` / `0x449CF0`: Master, Music, SFX, Engine, Voice) |
+| `src/joystick_sdl.cpp` | Native SDL3 Joystick/HOTAS backend replacing 1998 WinMM slot-0 `joyGetDevCapsA`/`joyGetPosEx` with custom axis/invert/deadzone/button mapping |
 | `src/video_sdl.cpp` | SDL3 + OpenGL 3.3 2D layer, windowing, keyboard/mouse input, WinMM joystick disable, SkipIntro & 100 FPS QPC timer (`0x438CB0` / `0x41E386`) |
 | `src/glide_gl.cpp` | Native OpenGL 3.3 Glide 2.43 renderer (aspect-accurate textures, post-LFB HUD lines) + True Hor+ 3D projection (`0x459A5D`), frustum (`0x4599ED`), draw distance & 64-bit 3DZ cull (`0x44DF1D`) |
 | `src/overlay_ui.cpp` | Dear ImGui `F12` settings overlay, Campaign Intel Sidebar, Quick Keys image viewer & FPS/render stats HUD |

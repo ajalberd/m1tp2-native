@@ -4,6 +4,7 @@
 #include "campaign_hud.h"
 #include "gunnery.h"
 #include "audio_mixer.h"
+#include "joystick_sdl.h"
 #include "video_sdl.h"
 #include "glide_gl.h"
 #include <windows.h>
@@ -173,7 +174,9 @@ void LoadConfig() {
     while (std::fgets(line, sizeof(line), f)) {
         if (line[0] == '#' || line[0] == ';') continue;
         char key[128], val[128];
-        if (std::sscanf(line, " %127[^= \t] = %127s", key, val) == 2) {
+        if (std::sscanf(line, " %127[^= \t] = %127[^\r\n]", key, val) == 2) {
+            size_t vlen = std::strlen(val);
+            while (vlen > 0 && (val[vlen - 1] == ' ' || val[vlen - 1] == '\t')) val[--vlen] = '\0';
             if (_stricmp(key, "WindowWidth") == 0)     g_cfg.windowWidth     = std::atoi(val);
             if (_stricmp(key, "WindowHeight") == 0)    g_cfg.windowHeight    = std::atoi(val);
             if (_stricmp(key, "Fullscreen") == 0)      g_cfg.fullscreen      = (std::atoi(val) != 0);
@@ -205,6 +208,23 @@ void LoadConfig() {
             if (_stricmp(key, "GunnerMouseSens") == 0)       g_cfg.gunnerMouseSens       = static_cast<float>(std::atof(val));
             if (_stricmp(key, "BallisticLeadMode") == 0)     g_cfg.ballisticLeadMode     = std::atoi(val);
             if (_stricmp(key, "DisableJoystick") == 0)       g_cfg.disableJoystick       = (std::atoi(val) != 0);
+            if (_stricmp(key, "JoyDeviceName") == 0) {
+                std::strncpy(g_cfg.joyDeviceName, val, sizeof(g_cfg.joyDeviceName) - 1);
+                g_cfg.joyDeviceName[sizeof(g_cfg.joyDeviceName) - 1] = '\0';
+            }
+            if (_stricmp(key, "JoyAxisX") == 0)              g_cfg.joyAxisX              = std::atoi(val);
+            if (_stricmp(key, "JoyAxisY") == 0)              g_cfg.joyAxisY              = std::atoi(val);
+            if (_stricmp(key, "JoyAxisZ") == 0)              g_cfg.joyAxisZ              = std::atoi(val);
+            if (_stricmp(key, "JoyAxisR") == 0)              g_cfg.joyAxisR              = std::atoi(val);
+            if (_stricmp(key, "JoyInvertX") == 0)            g_cfg.joyInvertX            = (std::atoi(val) != 0);
+            if (_stricmp(key, "JoyInvertY") == 0)            g_cfg.joyInvertY            = (std::atoi(val) != 0);
+            if (_stricmp(key, "JoyInvertZ") == 0)            g_cfg.joyInvertZ            = (std::atoi(val) != 0);
+            if (_stricmp(key, "JoyInvertR") == 0)            g_cfg.joyInvertR            = (std::atoi(val) != 0);
+            if (_stricmp(key, "JoyDeadzone") == 0)           g_cfg.joyDeadzone           = static_cast<float>(std::atof(val));
+            if (_stricmp(key, "JoyBtn1") == 0)               g_cfg.joyBtn1               = std::atoi(val);
+            if (_stricmp(key, "JoyBtn2") == 0)               g_cfg.joyBtn2               = std::atoi(val);
+            if (_stricmp(key, "JoyBtn3") == 0)               g_cfg.joyBtn3               = std::atoi(val);
+            if (_stricmp(key, "JoyBtn4") == 0)               g_cfg.joyBtn4               = std::atoi(val);
             if (_stricmp(key, "AudioMute") == 0)             g_cfg.audioMute             = (std::atoi(val) != 0);
             if (_stricmp(key, "AudioMasterVol") == 0)        g_cfg.audioMasterVol        = static_cast<float>(std::atof(val));
             if (_stricmp(key, "AudioMusicVol") == 0)         g_cfg.audioMusicVol         = static_cast<float>(std::atof(val));
@@ -261,6 +281,20 @@ void SaveConfig() {
     std::fprintf(f, "# BallisticLeadMode: 0=SmoothFCS (Default), 1=ManualNoAutoLead, 2=Stock1998\n");
     std::fprintf(f, "BallisticLeadMode = %d\n", g_cfg.ballisticLeadMode);
     std::fprintf(f, "DisableJoystick = %d\n", g_cfg.disableJoystick ? 1 : 0);
+    std::fprintf(f, "JoyDeviceName = %s\n", g_cfg.joyDeviceName[0] ? g_cfg.joyDeviceName : "Auto");
+    std::fprintf(f, "JoyAxisX = %d\n", g_cfg.joyAxisX);
+    std::fprintf(f, "JoyAxisY = %d\n", g_cfg.joyAxisY);
+    std::fprintf(f, "JoyAxisZ = %d\n", g_cfg.joyAxisZ);
+    std::fprintf(f, "JoyAxisR = %d\n", g_cfg.joyAxisR);
+    std::fprintf(f, "JoyInvertX = %d\n", g_cfg.joyInvertX ? 1 : 0);
+    std::fprintf(f, "JoyInvertY = %d\n", g_cfg.joyInvertY ? 1 : 0);
+    std::fprintf(f, "JoyInvertZ = %d\n", g_cfg.joyInvertZ ? 1 : 0);
+    std::fprintf(f, "JoyInvertR = %d\n", g_cfg.joyInvertR ? 1 : 0);
+    std::fprintf(f, "JoyDeadzone = %.2f\n", g_cfg.joyDeadzone);
+    std::fprintf(f, "JoyBtn1 = %d\n", g_cfg.joyBtn1);
+    std::fprintf(f, "JoyBtn2 = %d\n", g_cfg.joyBtn2);
+    std::fprintf(f, "JoyBtn3 = %d\n", g_cfg.joyBtn3);
+    std::fprintf(f, "JoyBtn4 = %d\n", g_cfg.joyBtn4);
     std::fprintf(f, "AudioMute = %d\n", g_cfg.audioMute ? 1 : 0);
     std::fprintf(f, "AudioMasterVol = %.2f\n", g_cfg.audioMasterVol);
     std::fprintf(f, "AudioMusicVol = %.2f\n", g_cfg.audioMusicVol);
@@ -282,6 +316,7 @@ extern "C" __declspec(dllexport) void __cdecl M1TP2_RecompInit() {
     m1::CampaignInstallHooks();
     m1::GunneryInstallHooks();
     m1::AudioMixerInstallHooks();
+    m1::JoystickSDLInstallHooks();
     m1::VideoSDLInstallHooks();
     m1::GlideGLInstallHooks();
     m1::LogPrintf("[CORE] All native replacement hooks installed successfully.\n");
@@ -290,6 +325,7 @@ extern "C" __declspec(dllexport) void __cdecl M1TP2_RecompInit() {
 BOOL WINAPI DllMain(HINSTANCE /*hInst*/, DWORD reason, LPVOID /*reserved*/) {
     if (reason == DLL_PROCESS_DETACH) {
         m1::GlideGLShutdown();
+        m1::JoystickSDLShutdown();
         m1::VfsModShutdown();
         m1::HeapGuardShutdown();
         m1::LogShutdown();

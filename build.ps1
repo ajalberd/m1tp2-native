@@ -104,6 +104,7 @@ Write-Host "Building m1tp2_recomp.dll (32-bit x86, SDL3 + OpenGL 3.3 + Dear ImGu
     "$src\campaign_hud.cpp" `
     "$src\gunnery.cpp" `
     "$src\audio_mixer.cpp" `
+    "$src\joystick_sdl.cpp" `
     "$src\gl_loader.cpp" `
     "$src\overlay_ui.cpp" `
     "$src\video_sdl.cpp" `
